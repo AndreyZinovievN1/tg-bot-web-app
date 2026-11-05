@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { Lottie } from 'lottie-react';
-import { giftIdText } from '../../utils/giftCatalog.js';
 
 /**
  * Сколько анимаций качаем одновременно.
@@ -271,7 +270,8 @@ function loadFrame(giftId) {
  * причину не отличить (у сервера на этот случай `[gifts] анимация подарка
  * недоступна` в `server/giftsApi.js`).
  */
-function GiftLottie({ fallback = null, giftId, keepFallback = false, lazy = false }) {
+function GiftLottie({ fallback = null, giftId, keepFallback = false, lazy = false, playing = true, loop = true, onComplete }) {
+  const playerRef = useRef(null);
   const anchorRef = useRef(null);
   const [frame, setFrame] = useState(null);
   const [failedId, setFailedId] = useState('');
@@ -279,7 +279,14 @@ function GiftLottie({ fallback = null, giftId, keepFallback = false, lazy = fals
   const [inView, setInView] = useState(!lazy);
   // Id — строка цифр (`giftIdText`): девятнадцать знаков число не переживает, а он
   // же уходит в адрес анимации (`pumpQueue`).
-  const id = giftIdText(giftId);
+  const key = String(giftId || '').trim();
+  const id = /^(?:unique-)?[0-9]+$/.test(key) && !/^(?:unique-)?0+$/.test(key) ? key : '';
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (playing) player?.play();
+    else player?.stop();
+  }, [playing, frame, inView]);
 
   /**
    * Ленивая карточка ждёт, пока попадёт в кадр.
@@ -341,6 +348,7 @@ function GiftLottie({ fallback = null, giftId, keepFallback = false, lazy = fals
         .then(animation => {
           // Кадр всё-таки приехал: следующий промах по этому подарку снова
           // расскажет о себе в консоль.
+          if (cancelled) return;
           reportedFailures.delete(id);
           setFrame({ animation, giftId: id });
         })
@@ -350,6 +358,7 @@ function GiftLottie({ fallback = null, giftId, keepFallback = false, lazy = fals
             return;
           }
 
+          if (cancelled) return;
           setFailedId(id);
           reportFailure(id, error);
 
@@ -384,9 +393,18 @@ function GiftLottie({ fallback = null, giftId, keepFallback = false, lazy = fals
       <Lottie
         aria-hidden="true"
         as="span"
-        autoplay
+        autoplay={playing}
         className="loot-lottie"
-        loop
+        lottieRef={playerRef}
+        loop={loop}
+        rendererSettings={{ preserveAspectRatio: 'xMidYMid meet' }}
+        subscriptions={{
+          ready: () => { if (!playing) playerRef.current?.stop(); },
+          complete: () => {
+            if (!loop) playerRef.current?.stop();
+            onComplete?.();
+          },
+        }}
         src={frame.animation}
       />
     );

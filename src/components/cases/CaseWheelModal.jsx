@@ -1,25 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import { FiCopy, FiExternalLink, FiX } from 'react-icons/fi';
-import { caseTypes as legacyCaseTypes, giftTypes, rewardRarities, rewardVisuals } from '../../config/casesMeta.js';
+import { caseTypes as legacyCaseTypes, giftTypes, rewardVisuals } from '../../config/casesMeta.js';
 import { supportUrl } from '../../config/support.js';
 import { useTranslation } from '../../i18n/I18nContext.js';
 import { caseTitle, giftTitle } from '../../utils/caseText.js';
-import { findGift } from '../../utils/casePrizes.js';
+import { buildCasePrizes, findGift, prizeAmountText } from '../../utils/casePrizes.js';
 import { giftAnimationKey, giftIdText } from '../../utils/giftCatalog.js';
 import GiftArt from './GiftArt.jsx';
+import GiftLottie from './GiftLottie.jsx';
+import TelegramStar from '../common/TelegramStar.jsx';
 
 /**
- * Открытие кейса в стиле CS2: рейка наград разгоняется, плавно тормозит до
- * победного слота, затем идёт вспышка и карточка награды. Редкость дропа
- * (`rewardRarities`) задаёт громкость выпадения: от тихого свечения у монет до
- * лучей, ударных волн и разлёта искр у легендарного подарка.
- *
- * Всё движение считает один rAF-цикл и пишет `transform` прямо в DOM: React не
- * перерисовывается на каждом кадре, поэтому рейка идёт без рывков. Каждый слот,
- * прошедший под указателем, отбивается тактильным «тиком» — как в CS2.
+ * One animation timeline moves all case reels together. Each winning slot uses
+ * its corresponding supplied reward; animation never chooses or grants rewards.
  */
-
-/** Порядок наград в рейке: редкие попадаются реже, как и в реальном дропе. */
+/** Decorative fallback for legacy catalogs without contents; never used as RNG. */
 const reelPattern = [
   'coins',
   'starcoins',
@@ -63,28 +58,6 @@ const SETTLE_BACK = 7;
 const FLASH_MS = 380;
 /** Минимальный зазор между тактильными «тиками» рейки. */
 const TICK_MS = 70;
-/** Сколько угольков поднимается вверх у легендарного дропа. */
-const EMBER_COUNT = 7;
-/** Уровни, у которых в выдаче появляются лучи и световой столб. */
-const RAY_TIERS = ['rare', 'epic', 'legendary'];
-
-/** Готовая рейка: узор размножается до нужной длины один раз при загрузке. */
-const reelItems = Array.from({ length: REEL_LENGTH }, (_, index) => {
-  const type = reelPattern[index % PATTERN_PERIOD];
-
-  return { key: `${type}-${index}`, ...rewardVisuals[type] };
-});
-
-/** Порядок уровней редкости: индекс в списке = число полосок в слоте. */
-const RARITY_STEPS = Object.keys(rewardRarities);
-
-/** Сколько полосок редкости рисовать в слоте: 1 у common … 5 у legendary. */
-function raritySteps(tier) {
-  const index = RARITY_STEPS.indexOf(tier);
-
-  return index < 0 ? 1 : index + 1;
-}
-
 function CaseWheelModal({
   caseType,
   caseTypes = legacyCaseTypes,
@@ -95,8 +68,17 @@ function CaseWheelModal({
   reward,
   onClose,
   onReveal,
+  demo = false,
+  speed = 'normal',
+  onRepeat,
+  drops = null,
+  results = [],
+  deliveryStates = {},
+  deliveryStatusError = false,
+  totalResults = 1,
+  onRetry,
 }) {
-  const { t } = useTranslation();
+  const { t, tp } = useTranslation();
   const caseMeta = caseTypes[caseType];
   const [phase, setPhase] = useState('spin');
   const [winnerIndex, setWinnerIndex] = useState(-1);
@@ -109,24 +91,29 @@ function CaseWheelModal({
   const tickRef = useRef({ slot: -1, at: 0 });
   const onRevealRef = useRef(onReveal);
 
-  const rewardMeta = reward ? rewardVisuals[reward.type] : null;
-  // Подарок Telegram: если сервер вернул строку наполнения (`giftId`), в медальоне
-  // показываем анимацию именно этого подарка, а не общий значок приза. Уникального
-  // подарка в каталоге нет — это экземпляр с аккаунта, поэтому его собираем из
-  // самой награды (`giftKind`/`giftNum` кладёт сервер, см. `deliverGift`
-  // в `server/caseGifts.js`).
-  const revealGift = reward?.type === 'gift'
-    ? (findGift(gifts, reward.giftId) || (reward.giftKind === 'unique'
-      ? {
-        kind: 'unique',
-        id: giftIdText(reward.giftId),
-        title: reward.title,
-        num: Math.max(0, Math.trunc(Number(reward.giftNum) || 0)),
-      }
-      : null))
-    : null;
-  const rarityKey = rewardMeta?.tier || '';
-  const rarity = rewardRarities[rarityKey] || null;
+  const rowCount = Math.min(5, Math.max(1, totalResults));
+  const prizes = buildCasePrizes(caseMeta || {});
+  const winners = results.length ? results : reward ? [reward] : [];
+  const rarityKey = rewardVisuals[reward?.type]?.tier || '';
+  const visual = item => rewardVisuals[item?.type] || { icon: '✦' };
+  const giftFor = item => item?.type === 'gift' ? findGift(gifts, item.giftId) ||
+    (item.giftId ? { id: giftIdText(item.giftId), kind: item.giftKind, num: item.giftNum, title: item.title } : null) : null;
+  const art = (item, animated = false) => {
+    const gift = giftFor(item);
+    return gift ? animated
+      ? <GiftArt animated interactive gift={gift} label={item.title || t('cases.rewards.gift')} />
+      : <GiftLottie lazy playing={false} giftId={giftAnimationKey(gift)} fallback={<GiftArt interactive gift={gift} />} />
+      : item?.image ? <img src={item.image} alt="" decoding="async" /> : visual(item).icon;
+  };
+  const value = item => {
+    const gift = giftFor(item);
+    if (Number(gift?.stars) > 0) return <><TelegramStar /> {gift.stars}</>;
+    const amount = item?.payload?.amount ?? item?.amount;
+    const days = item?.payload?.days ?? item?.days;
+    if (Number(days) > 0) return tp('cases.days', days);
+    if (Number(amount) > 0) return amount;
+    return prizeAmountText(item || {}, tp);
+  };
   const isRevealed = phase === 'reveal';
   const canClose = !isOpening;
   // Код обращения из ответа сервера: он есть только у сбоя выдачи подарка
@@ -172,7 +159,8 @@ function CaseWheelModal({
 
     const haptic = window.Telegram?.WebApp?.HapticFeedback;
     const paint = offset => {
-      reel.style.transform = `translate3d(${-offset}px, 0, 0)`;
+      const tracks = reel.parentElement?.parentElement?.querySelectorAll('.case-reel__track') || [reel];
+      for (const track of tracks) track.style.transform = 'translate3d(' + (-offset) + 'px, 0, 0)';
     };
     let raf = 0;
     let flashTimer = 0;
@@ -186,6 +174,17 @@ function CaseWheelModal({
 
     // Награды ещё нет — держим разгон, пока сервер выбирает дроп. Сдвиг
     // зацикливается на период узора, поэтому рейка крутится бесконечно.
+    const instant = speed === 'instant' || window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const fast = speed === 'fast';
+    if (instant) {
+      if (!reward) return undefined;
+      const timer = window.setTimeout(() => {
+        setWinnerIndex(0);
+        setPhase('reveal');
+        onRevealRef.current?.(reward);
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
     if (!reward) {
       spinStartRef.current = performance.now();
       let last = spinStartRef.current;
@@ -211,7 +210,7 @@ function CaseWheelModal({
     setWinnerIndex(landing.winnerIndex);
     setPhase('land');
 
-    const delay = Math.max(0, MIN_SPIN_MS - (performance.now() - spinStartRef.current));
+    const delay = Math.max(0, (fast ? 100 : MIN_SPIN_MS) - (performance.now() - spinStartRef.current));
     let landStart = 0;
 
     const land = now => {
@@ -219,7 +218,7 @@ function CaseWheelModal({
         landStart = now;
       }
 
-      const progress = Math.min(1, (now - landStart) / LAND_MS);
+      const progress = Math.min(1, (now - landStart) / (fast ? 900 : LAND_MS));
       const offset = start + landing.distance * easeOutSpin(progress);
 
       paint(offset);
@@ -241,18 +240,18 @@ function CaseWheelModal({
 
         if (settleProgress < 1) {
           raf = requestAnimationFrame(settle);
+        } else {
+          flashTimer = window.setTimeout(() => {
+            setPhase('reveal');
+            triggerHaptic('notificationOccurred', 'success');
+            onRevealRef.current?.(reward);
+          }, fast ? 120 : FLASH_MS);
         }
       };
 
       raf = requestAnimationFrame(settle);
       triggerHaptic('impactOccurred', 'heavy');
       setPhase('flash');
-
-      flashTimer = window.setTimeout(() => {
-        setPhase('reveal');
-        triggerHaptic('notificationOccurred', 'success');
-        onRevealRef.current?.(reward);
-      }, FLASH_MS);
     };
 
     const waitTimer = window.setTimeout(() => {
@@ -264,41 +263,11 @@ function CaseWheelModal({
       window.clearTimeout(flashTimer);
       cancelAnimationFrame(raf);
     };
-  }, [error, reward]);
+  }, [error, reward, speed]);
 
   if (!caseMeta) {
     return null;
   }
-
-  // Искры вылетают веером: углы считаем детерминированно, без случайности.
-  const sparks = rarity
-    ? Array.from({ length: rarity.sparks }, (_, index) => (
-        <span
-          className="case-reveal__spark"
-          key={index}
-          style={{
-            '--spark-angle': `${Math.round((360 / rarity.sparks) * index + (index % 3) * 9)}deg`,
-            '--spark-delay': `${(index % 4) * 55}ms`,
-          }}
-        />
-      ))
-    : null;
-  // У легендарного дропа искры не только разлетаются веером, но и поднимаются вверх.
-  const embers = rarityKey === 'legendary'
-    ? Array.from({ length: EMBER_COUNT }, (_, index) => (
-        <span
-          className="case-reveal__ember"
-          key={index}
-          style={{
-            '--ember-x': `${11 + (index * 78) / (EMBER_COUNT - 1)}%`,
-            '--ember-delay': `${index * 120}ms`,
-          }}
-        />
-      ))
-    : null;
-  // Редкая выдача громче обычной: столб света, вторая волна, угольки.
-  const isGrand = rarityKey === 'epic' || rarityKey === 'legendary';
-  const showsRays = RAY_TIERS.includes(rarityKey);
 
   return (
     <div
@@ -311,7 +280,7 @@ function CaseWheelModal({
       }}
     >
       <div
-        className={`case-modal case-modal--${caseMeta.accent} ${rarityKey ? `tier-${rarityKey}` : ''} is-${phase}`}
+        className={`case-modal case-modal--parallel case-modal--${caseMeta.accent} ${rarityKey ? `tier-${rarityKey}` : ''} is-${phase}`}
         role="dialog"
         aria-modal="true"
         onClick={event => {
@@ -328,8 +297,8 @@ function CaseWheelModal({
           </span>
 
           <div className="case-modal__title">
-            <span>{t('cases.caseOpening')}</span>
-            <h2>{caseTitle(caseTypes, caseType)}</h2>
+            <span>{demo ? t('cases.demo') : t('cases.caseOpening')}</span>
+            <h2>{caseTitle(caseTypes, caseType)}{totalResults > 1 ? ` · ×${totalResults}` : ''}</h2>
           </div>
 
           <button
@@ -343,66 +312,49 @@ function CaseWheelModal({
           </button>
         </header>
 
-        {/* Рейка: пока едет — разгон и торможение, на выдаче уходит в фон. */}
-        <div className={`case-reel ${reward ? 'is-locked' : 'is-live'} ${isRevealed ? 'is-away' : ''}`}>
-          <span className="case-reel__bed" aria-hidden="true" />
-          <span className="case-reel__scan" aria-hidden="true" />
-
-          <div className="case-reel__track" ref={reelRef}>
-            {reelItems.map((item, index) => {
-              const isStopped = index === winnerIndex && (phase === 'flash' || phase === 'reveal');
-              const meta = index === winnerIndex && rewardMeta ? rewardMeta : item;
-
-              return (
-                <div className={`case-reel__item tier-${meta.tier} ${isStopped ? 'is-winner' : ''}`} key={item.key}>
-                  <span className="case-reel__icon">{meta.icon}</span>
-                  <small>{meta.labelKey ? t(meta.labelKey) : meta.label}</small>
-                  <span className="case-reel__tier" aria-hidden="true">
-                    {Array.from({ length: raritySteps(meta.tier) }, (_, bar) => <i key={bar} />)}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-
-          <span className="case-reel__fade case-reel__fade--left" aria-hidden="true" />
-          <span className="case-reel__fade case-reel__fade--right" aria-hidden="true" />
-          <span className="case-reel__pointer" aria-hidden="true" />
-          <span className="case-reel__ruler" aria-hidden="true" />
+        <div className={'case-reels' + (isRevealed ? ' is-complete' : '')} aria-hidden="true" inert>
+          {Array.from({ length: rowCount }, (_, rowIndex) => {
+            const rowReward = winners[rowIndex];
+            return <div className="case-reel" key={rowIndex}>
+              <div className="case-reel__track" ref={rowIndex === 0 ? reelRef : undefined}>
+                {Array.from({ length: REEL_LENGTH }, (_, index) => {
+                  const stopped = index === winnerIndex && (phase === 'flash' || phase === 'reveal');
+                  const item = index === winnerIndex && rowReward ? rowReward
+                    : prizes.length ? prizes[(index % PATTERN_PERIOD + rowIndex * 3) % prizes.length]
+                      : { type: reelPattern[(index + rowIndex) % PATTERN_PERIOD] };
+                  return <div className={'case-reel__item' + (stopped ? ' is-winner' : '')} key={index}>
+                    <span className="case-reel__art">{art(item)}</span>
+                    <small>{item.title || t(visual(item).labelKey || 'cases.rewardLabelFallback')}</small>
+                    <span className="case-reel__value">{value(item)}</span>
+                  </div>;
+                })}
+              </div>
+            </div>;
+          })}
+          <span className="case-reels__marker" />
         </div>
 
+        {error && onRetry ? <button className="case-reveal__cta" type="button" onClick={onRetry}>{t('cases.batchRetry')}</button> : null}
         {isRevealed && reward ? (
-          /* ===== награда: лучи, волна и искры зависят от редкости дропа ===== */
-          <div className={`case-reveal tier-${rarityKey}`}>
-            {isGrand ? <span className="case-reveal__beam" aria-hidden="true" /> : null}
-            {showsRays ? <span className="case-reveal__rays" aria-hidden="true" /> : null}
-            <span className="case-reveal__wave" aria-hidden="true" />
-            {isGrand ? <span className="case-reveal__wave case-reveal__wave--late" aria-hidden="true" /> : null}
-            {embers ? <span className="case-reveal__embers" aria-hidden="true">{embers}</span> : null}
-            <span className="case-reveal__sparks" aria-hidden="true">{sparks}</span>
-
-            <span className={`case-reveal__medal ${revealGift ? 'is-gift' : ''}`}>
-              <span className="case-reveal__medal-ring" aria-hidden="true" />
-
-              {revealGift ? (
-                <GiftArt
-                  animated
-                  className="gift-art case-reveal__gift"
-                  gift={revealGift}
-                  giftId={giftAnimationKey(revealGift)}
-                />
-              ) : rewardMeta?.icon}
-            </span>
-
-            <span className="case-reveal__rarity">{t(rarity.labelKey)}</span>
-            <strong className="case-reveal__title">{rewardDisplay(reward)}</strong>
-            <p className="case-reveal__text">{reward.description}</p>
-
+          <section className="case-results" aria-live="polite">
+            <h3>{demo ? t('cases.demo') + ' · ' : ''}{t('cases.yourWinnings')}</h3>
+            <div className="case-batch-results">
+              {winners.map((item, index) => <div className="case-batch-results__item" key={index}>
+                <span>{art(item, true)}</span>
+                <strong>{rewardDisplay(item)}</strong>
+                <span className="case-reel__value">{value(item)}</span>
+                <small>{!demo && item.deliveryId
+                  ? t('cases.delivery_' + (deliveryStates[item.deliveryId] || item.deliveryStatus || 'queued'))
+                  : item.description}</small>
+                {!demo && item.deliveryId ? <small>{t('cases.deliveryReference', { id: item.deliveryId })}</small> : null}
+              </div>)}
+            </div>
+            {deliveryStatusError ? <p role="status">{t('cases.deliveryStatusError')}</p> : null}
+            {demo ? <button className="case-reveal__cta" disabled={!canClose} type="button" onClick={onRepeat}>{t('cases.demoAgain')}</button> : null}
             <button className="case-reveal__cta" disabled={!canClose} type="button" onClick={onClose}>
-              <span className="ops-claim__sheen" aria-hidden="true" />
-              {t('cases.revealDone')}
+              {t('cases.openMore')}
             </button>
-          </div>
+          </section>
         ) : (
           /* ===== статус: сканирование, торможение или ошибка открытия ===== */
           <div className={`case-status ${error ? 'is-error' : ''}`}>
@@ -416,7 +368,7 @@ function CaseWheelModal({
                     : t('cases.spinning')}
             </span>
             <strong className="case-status__title">{error || t('cases.openingTitle')}</strong>
-            <p className="case-status__text">{error ? t('cases.failedText') : t('cases.openingText')}</p>
+            <p className="case-status__text">{error ? t('cases.failedText') : t(demo ? 'cases.demoNotice' : 'cases.openingText')}</p>
 
             {/* Сбой выдачи подарка: игрок называет поддержке код обращения, по нему
                 админ находит лог в чате кейсов и выдаёт подарок руками. */}
@@ -455,6 +407,7 @@ function CaseWheelModal({
             ) : null}
           </div>
         )}
+        {drops}
       </div>
     </div>
   );
@@ -478,12 +431,11 @@ function idleOffset(spun) {
 }
 
 /**
- * Победный слот: берём ближайший слот, до которого рейка проедет не меньше
- * `LAND_TRAVEL` пикселей, и добавляем дрожание — слот встаёт не строго по
- * центру, как в настоящей рулетке.
+ * Победный слот после торможения и микро-отката встаёт строго по центру.
+ * Позиция влияет только на анимацию, не на полученную награду.
  */
 function buildLanding(startOffset) {
-  const jitter = (Math.random() - 0.5) * ITEM_WIDTH * 0.36;
+  const jitter = SETTLE_BACK;
   const index = Math.round((startOffset + LAND_TRAVEL) / ITEM_STEP);
   const winnerIndex = Math.max(1, Math.min(index, REEL_LENGTH - 3));
   const target = winnerIndex * ITEM_STEP + ITEM_WIDTH / 2 + jitter;
@@ -526,7 +478,7 @@ function triggerHaptic(method, type) {
 
 function rewardDisplay(reward) {
   if (reward.type === 'gift') {
-    return giftTitle(giftTypes, reward.giftCode);
+    return reward.title || giftTitle(giftTypes, reward.giftCode);
   }
 
   return reward.title;

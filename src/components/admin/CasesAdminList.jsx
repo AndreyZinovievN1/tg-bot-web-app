@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { FiPlus, FiSliders, FiStar, FiX } from 'react-icons/fi';
+import { caseCategoryTitle } from '../../utils/caseCatalog.js';
+import { FiPlus, FiSliders, FiX } from 'react-icons/fi';
 import { caseContentVisuals } from '../../config/casesMeta.js';
 import { useTranslation } from '../../i18n/I18nContext.js';
 
@@ -17,7 +18,7 @@ import { useTranslation } from '../../i18n/I18nContext.js';
  * Отдельным блоком — создание кейса: код придумывает владелец, а тексты,
  * картинку и призы он задаёт уже в редакторе.
  */
-function CasesAdminList({ cases, catalog, busy, language, onCreate, onOpen, onToggle }) {
+function CasesAdminList({ cases, catalog, busy, language, onCreate, onOpen, onToggle, categories = [], onTransfer }) {
   const { t } = useTranslation();
   const [creating, setCreating] = useState(false);
   const [code, setCode] = useState('');
@@ -94,6 +95,8 @@ function CasesAdminList({ cases, catalog, busy, language, onCreate, onOpen, onTo
                 language={language}
                 onOpen={onOpen}
                 onToggle={onToggle}
+                categories={categories}
+                onTransfer={onTransfer}
               />
             ))}
           </div>
@@ -110,7 +113,7 @@ function CasesAdminList({ cases, catalog, busy, language, onCreate, onOpen, onTo
 }
 
 /** Одна строка-капсула: картинка, название с кодом, состав, «настроить», тумблер. */
-function CaseRow({ item, busy, language, onOpen, onToggle }) {
+function CaseRow({ item, busy, language, onOpen, onToggle, categories, onTransfer }) {
   const { t } = useTranslation();
   const contents = Array.isArray(item.contents) ? item.contents : [];
   const stars = Number(item.stars) || 0;
@@ -144,6 +147,18 @@ function CaseRow({ item, busy, language, onOpen, onToggle }) {
           <small>{summary}</small>
         </span>
       </button>
+
+      <label className="cases-category-admin__assignment">
+        <span>{t('caseCategoryAdmin.category')}</span>
+        <select className="docs-input" disabled={busy} value={item.categoryId || ''}
+          aria-label={t('caseCategoryAdmin.moveCase', { title })}
+          onChange={event => onTransfer(item.id, event.target.value)}>
+          <option value="">{t('cases.categories.unassigned')}</option>
+          {categories.map(category => (
+            <option key={category.id} value={category.id}>{caseCategoryTitle(category, language, t)}</option>
+          ))}
+        </select>
+      </label>
 
       <div className="cases-admin-row__tools">
         <button

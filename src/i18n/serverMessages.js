@@ -9,6 +9,11 @@ import { t, tp } from './index.js';
  */
 
 const serverErrorKeys = {
+  "Некорректная категория кейса": 'caseCategoryInvalid',
+  "Укажите название категории": 'caseCategoryRequired',
+  "Категория не найдена": 'caseCategoryMissing',
+  "Список категорий изменился. Обновите данные": 'caseCategoryConflict',
+  "Выберите категорию для переноса": 'caseCategoryTarget',
   'Слишком много попыток. Попробуй через минуту.': 'tooManyAttempts',
   'В таблице owner нет строки для сохранения пароля': 'ownerRowMissing',
   'Пароль админки не задан в таблице owner': 'adminPasswordMissing',

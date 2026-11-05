@@ -314,13 +314,46 @@ CREATE TABLE IF NOT EXISTS mini_app_case_balances (
   PRIMARY KEY (chat_id, case_id)
 );
 
+-- CASE CATEGORIES MIGRATION: seed only when category_id is first introduced.
+DO $case_categories$
+BEGIN
+  PERFORM pg_advisory_xact_lock(723410, 1);
+  CREATE TABLE IF NOT EXISTS mini_app_case_categories (
+    id text PRIMARY KEY,
+    titles jsonb NOT NULL DEFAULT '{}'::jsonb,
+    sort_order integer NOT NULL DEFAULT 100,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+  );
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = 'mini_app_cases'::regclass
+      AND attname = 'category_id' AND NOT attisdropped
+  ) THEN
+    ALTER TABLE mini_app_cases ADD COLUMN category_id text
+      REFERENCES mini_app_case_categories(id) ON DELETE SET NULL;
+    INSERT INTO mini_app_case_categories (id, titles, sort_order) VALUES
+      ('standard', '{"ru":"Стандартные кейсы","en":"Standard cases","uk":"Стандартні кейси"}', 10),
+      ('thematic', '{"ru":"Тематические кейсы","en":"Themed cases","uk":"Тематичні кейси"}', 20),
+      ('special', '{"ru":"Особые кейсы","en":"Special cases","uk":"Особливі кейси"}', 30)
+    ON CONFLICT (id) DO NOTHING;
+    UPDATE mini_app_cases SET category_id = CASE
+      WHEN id IN ('spring', 'march_8th') THEN 'thematic' ELSE 'standard' END;
+  END IF;
+  CREATE INDEX IF NOT EXISTS idx_mini_app_cases_category ON mini_app_cases(category_id);
+END;
+$case_categories$;
+-- END CASE CATEGORIES MIGRATION
+
 -- Права приложению (подставь имя роли из DB_USER):
 -- GRANT SELECT, INSERT, UPDATE, DELETE ON mini_app_cases, mini_app_case_balances TO space_user;
+-- GRANT SELECT, INSERT, UPDATE, DELETE ON mini_app_case_categories TO space_user;
 
 -- ── VIP за реальные деньги (Tribute) ─────────────────────────────────────────
 -- Журнал вебхуков Tribute. Приложение создаёт таблицу само (ensureTributeSchema),
 -- но если у него нет прав CREATE — выполни этот блок от владельца БД.
--- Уникальный event_key защищает от двойного продления VIP при повторе вебхука.
+-- Уникальный event_key защищает от двойного продления VIP при повторе вебхука:
+-- для товаров это `purchase_id`, для подписки — id подписки и период.
 CREATE TABLE IF NOT EXISTS tribute_events (
   id bigserial PRIMARY KEY,
   event_key text NOT NULL UNIQUE,
@@ -328,6 +361,7 @@ CREATE TABLE IF NOT EXISTS tribute_events (
   status text NOT NULL DEFAULT 'pending',
   telegram_user_id bigint,
   subscription_id bigint,
+  product_id bigint,
   period_id bigint,
   period text,
   price bigint,
@@ -339,6 +373,10 @@ CREATE TABLE IF NOT EXISTS tribute_events (
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   processed_at timestamp with time zone
 );
+
+-- Колонка появилась вместе с оплатой цифровыми товарами (`new_digital_product`):
+-- на уже созданной таблице её добавляет эта строка.
+ALTER TABLE tribute_events ADD COLUMN IF NOT EXISTS product_id bigint;
 
 CREATE INDEX IF NOT EXISTS idx_tribute_events_user ON tribute_events (telegram_user_id, created_at DESC);
 

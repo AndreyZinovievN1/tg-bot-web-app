@@ -1,4 +1,7 @@
 import crypto from 'node:crypto'
+import { createSpaceStars, spaceStarPackages, spaceStarCustom } from './spaceStars.js'
+import { createCaseGiftQueue, createCaseGiftQueueApi, enqueueCaseGift } from './caseGiftQueue.js'
+import { createDropProfiles } from './dropProfiles.js'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -14,15 +17,18 @@ import {
   caseForSale,
   caseStoreTitle,
   createCasesApi,
-  defaultCaseTemplates,
   ensureCasesSchema,
   legacyCaseIds,
   loadCaseTemplates,
+  loadCaseCatalogSnapshot,
+  loadCaseDrops,
+  openCaseBatch,
   toClientCase,
 } from './casesApi.js'
 import {
   createGiftsApi,
   giftCatalogSnapshot,
+  giftIdText,
   loadGiftCatalog,
   loadSavedGifts,
   savedGiftsSnapshot,
@@ -44,6 +50,8 @@ import {
   ensureTributeSchema,
   loadTributeConfig,
   tributeVipSnapshot,
+  tributeSpaceStarsSnapshot,
+  spaceStarProductUnits,
 } from './tributeApi.js'
 import express from 'express'
 import pg from 'pg'
@@ -117,15 +125,44 @@ const vipInvoiceTexts = {
 /**
  * Продажа VIP за реальные деньги через Tribute (карта, СБП).
  *
- * Тарифы и сроки те же, что у оплаты звёздами: цена приходит из кабинета
- * Tribute (`GET /subscriptions`), а дни — из `vipPlans`, поэтому оба способа
- * оплаты дают одинаковый срок. Пока `TRIBUTE_API_KEY`, `TRIBUTE_VIP_SUBSCRIPTION_ID`
- * и `TRIBUTE_VIP_LINK` не заданы, раздел оплаты картой просто не показывается.
+ * Тарифы — это цифровые товары из кабинета Tribute: цена и ссылка на оплату
+ * приходят из `GET /products`, а срок VIP берётся из названия товара
+ * («Space VIP — 1 месяц») или из `TRIBUTE_VIP_PRODUCTS`. Дни складываются с
+ * текущим сроком в `vip_users`, поэтому повторная покупка продлевает подписку.
+ * Пока `TRIBUTE_API_KEY` не задан, раздел оплаты картой не показывается.
  * Подробности — в `server/tributeApi.js`.
  */
 const tributeConfig = loadTributeConfig(process.env)
 
 const pool = new Pool(createPoolConfig())
+let spacePackages = []
+let spaceCustom = null
+try { spacePackages = spaceStarPackages(process.env.SPACE_STARS_PACKAGES || undefined) }
+catch (error) { console.error('Space Stars catalog disabled:', error.message) }
+try { spaceCustom = spaceStarCustom(process.env.SPACE_STARS_CUSTOM || undefined) }
+catch (error) { console.error('Space Stars custom amount disabled:', error.message) }
+const spaceStars = createSpaceStars({ pool, telegram: telegramBotApi,
+  canPurchase: userId => isBotOwner(pool, userId),
+  disabledReason: !botToken ? 'botNotConfigured' : !paymentRelaySecret ? 'relayNotConfigured' : 'disabled',
+  enabled: process.env.SPACE_STARS_ENABLED === 'true' && Boolean(paymentRelaySecret) && Boolean(botToken), packages: spacePackages, custom: spaceCustom,
+  casePurchasesEnabled: process.env.SPACE_STARS_CASES_ENABLED === 'true',
+  vipPurchasesEnabled: process.env.SPACE_STARS_VIP_ENABLED === 'true', vipPlans, extendVipMembership,
+  tribute: async userId => {
+    const allowed = await canTestSpaceStarsPurchase(userId, '173087')
+    const snapshot = await tributeSpaceStarsSnapshot(tributeConfig, vipPlans, allowed)
+    return { ...snapshot, packages: snapshot.packages.map(pack =>
+      ({ ...pack, link: allowed && Object.hasOwn(spaceStarProductUnits, pack.id) && spaceStarProductUnits[pack.id] === pack.units ? pack.link : '',
+        webLink: allowed && snapshot.enabled && pack.id === '173087' && pack.units === 100 && pack.currency === 'USD' && pack.amount === 199
+          ? pack.webLink || 'https://web.tribute.tg/p/J1J' : '' })) }
+  },
+  findCase: findCaseTemplate, incrementCases: incrementCaseBalance })
+// Pending external awards keep their original delivery mode after configuration changes.
+const queuedGiftDelivery = createCaseGiftDelivery({ botToken, mode: 'telegram',
+  grantInternalGift: async () => { throw new Error('Queued gift must not become an internal reward') } })
+const caseGiftQueue = createCaseGiftQueue({ pool, deliver: queuedGiftDelivery.deliverGift,
+  onSent: (row, receipt) => notifyCaseOpening({ id: row.chat_id }, row.input.template,
+    receipt.reward, row.id, receipt.delivery),
+})
 const adminAttempts = new Map()
 const adminSessions = new Map()
 const adminLockMs = 60 * 1000
@@ -197,11 +234,11 @@ const caseBalanceColumns = legacyCaseIds
 const caseCacheMs = 30 * 1000
 let caseCatalogCache = { list: null, loadedAt: 0 }
 
-/** Актуальный список кейсов: из БД, либо стартовый набор, если таблица пуста. */
+/** Актуальный список кейсов из БД; пустой каталог остаётся пустым. */
 async function getCaseCatalog(client, { activeOnly = false } = {}) {
   if (!caseCatalogCache.list || Date.now() - caseCatalogCache.loadedAt >= caseCacheMs) {
     const stored = await loadCaseTemplates(client)
-    const list = stored.length > 0 ? stored : defaultCaseTemplates()
+    const list = stored
 
     caseCatalogCache = { list, loadedAt: Date.now() }
   }
@@ -252,6 +289,8 @@ app.use(express.json({
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true })
 })
+
+app.use('/api/space-stars', requireTelegramUser, spaceStars.router)
 
 app.post('/api/admin/login', requireTelegramUser, async (req, res, next) => {
   const chatId = req.telegramUser.id
@@ -830,7 +869,27 @@ app.post('/api/shop/purchase', requireTelegramUser, async (req, res, next) => {
  * Награда фиксируется вместе со списанием кейса, поэтому сбой выдачи откатывает
  * транзакцию, а лог об этом уходит в чат кейсов обязательно (см. `caseGifts.js`).
  */
+const dropProfiles = createDropProfiles({ pool, botToken })
+app.use(dropProfiles.router)
+app.get('/api/cases/drops', requireTelegramUser, async (req, res, next) => {
+  const caseType = typeof req.query.caseType === 'string' ? req.query.caseType.trim() : ''
+  if (!caseType || caseType.length > 128) {
+    res.status(400).json({ error: 'Invalid caseType' })
+    return
+  }
+  try {
+    res.set('Cache-Control', 'no-store').json({ drops: await dropProfiles.decorate(await loadCaseDrops(pool, caseType)) })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.use(createCaseGiftQueueApi({ pool, requireTelegramUser, requireAdminSession, requireOwner }))
+
 app.post('/api/cases/open', requireTelegramUser, async (req, res, next) => {
+  if (req.body.quantity !== undefined && req.body.quantity !== 1) {
+    return openBatchRequest(req, res, next)
+  }
   const caseType = String(req.body.caseType || '').trim()
   const incident = newCaseIncidentCode()
   const client = await pool.connect()
@@ -878,6 +937,51 @@ app.post('/api/cases/open', requireTelegramUser, async (req, res, next) => {
     next(error)
   }
 })
+
+async function openBatchRequest(req, res, next) {
+  const client = await pool.connect()
+  let result
+  let template
+  let stage = 'catalog'
+  try {
+    await client.query('BEGIN')
+    const caseType = String(req.body.caseType || '').trim()
+    template = await findCaseTemplate(client, caseType) || { id: caseType, active: false, contents: [] }
+    stage = 'batch'
+    result = await openCaseBatch(client, {
+      chatId: req.telegramUser.id, requestId: req.body.requestId, quantity: req.body.quantity,
+      template, take: takeCaseFromBalance, grant: openCaseAndGrantReward,
+    })
+    stage = 'commit'
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    if (error.code === '42P01') {
+      const incident = newCaseIncidentCode()
+      const context = await client.query(
+        "SELECT current_database() AS database, current_user AS role, current_schema() AS schema, current_setting('search_path') AS search_path"
+      ).catch(() => ({ rows: [] }))
+      // No SQL parameter values or user data: the exact missing relation stays in server logs.
+      console.error('[cases/batch] database error', { incident, code: error.code,
+        stage: error.batchStage || stage, message: error.message, ...context.rows[0] })
+      return res.status(503).json({ error: 'Ошибка сервера Mini App',
+        code: 'CASE_BATCH_DATABASE_ERROR', incident })
+    }
+    if (error.status || error.message === 'Этот кейс закончился') {
+      return res.status(error.status || 409).json({ error: error.message })
+    }
+    return next(error)
+  } finally { client.release() }
+  if (result.results.some(item => item.queuedId)) void caseGiftQueue.wake()
+  if (!result.replay) for (const opened of result.results) {
+    if (opened.queuedId) continue
+    notifyCaseOpening(req.telegramUser, template, opened.reward, newCaseIncidentCode(), opened.delivery).catch(console.error)
+  }
+  try {
+    res.json({ ok: true, rewards: result.results.map(item => item.reward),
+      data: await buildBootstrapPayload(req.telegramUser.id) })
+  } catch (error) { next(error) }
+}
 
 /**
  * Ответ на неудачное открытие: игроку — понятная ошибка с кодом обращения, в чат
@@ -967,6 +1071,18 @@ app.post('/api/payments/sync', requireTelegramUser, async (req, res, next) => {
 
   if (!orderId) {
     res.status(400).json({ error: 'Не передан orderId' })
+    return
+  }
+
+  try {
+    const synced = await spaceStars.syncOrder(req.telegramUser.id, orderId)
+    if (synced) {
+      res.json({ ok: true, ...synced, data: await buildBootstrapPayload(req.telegramUser.id) })
+      return
+    }
+  } catch (error) {
+    if (error.status) res.status(error.status).json({ error: error.message })
+    else next(error)
     return
   }
 
@@ -1108,6 +1224,7 @@ const tributeRouter = createTributeApi({
   requireTelegramUser,
   buildBootstrapPayload,
   extendVipMembership,
+  canPurchaseSpaceStars: canTestSpaceStarsPurchase,
 })
 app.use(tributeRouter)
 
@@ -1240,7 +1357,7 @@ ensureMissionsSchema(pool)
 // Таблицы кейсов создаются идемпотентно; стартовый набор (6 старых кейсов с их
 // весами и диапазонами) заливается только в пустые id — правки владельца в
 // админке не перезаписываются. После заливки сбрасываем кеш каталога.
-ensureCasesSchema(pool)
+const casesSchemaReady = ensureCasesSchema(pool)
   .then(({ added }) => {
     resetCaseCatalogCache()
     console.log(added ? `Cases schema ready (${added} стартовых кейсов)` : 'Cases schema ready')
@@ -1248,6 +1365,7 @@ ensureCasesSchema(pool)
   .catch((error) => {
     console.error('Cases schema init failed:', error.message)
     console.error('Выполни server/admin_setup.sql от владельца БД и выдай права приложению.')
+    throw error
   })
 
 // Таблица VIP-заказов (оплата подписки звёздами Telegram) создаётся идемпотентно.
@@ -1267,8 +1385,8 @@ ensureTributeSchema(pool)
   .then(() => {
     console.log(
       tributeConfig.enabled
-        ? 'Tribute schema ready (VIP за карту и СБП)'
-        : 'Tribute schema ready, но оплата картой выключена: задай TRIBUTE_API_KEY, TRIBUTE_VIP_SUBSCRIPTION_ID и TRIBUTE_VIP_LINK',
+        ? 'Tribute schema ready (VIP за карту и СБП: товары из кабинета)'
+        : 'Tribute schema ready, но оплата картой выключена: задай TRIBUTE_API_KEY',
     )
   })
   .catch((error) => {
@@ -1276,8 +1394,14 @@ ensureTributeSchema(pool)
     console.error('Выполни server/admin_setup.sql от владельца БД и выдай права приложению.')
   })
 
-app.listen(port, () => {
-  console.log(`Space Mini App API started on http://127.0.0.1:${port}`)
+casesSchemaReady.then(() => {
+  app.listen(port, () => {
+    console.log(`Space Mini App API started on http://127.0.0.1:${port}`)
+    caseGiftQueue.start()
+  })
+}).catch(() => {
+  console.error('API startup blocked: cases schema is not ready')
+  process.exitCode = 1
 })
 
 function createPoolConfig() {
@@ -1306,7 +1430,9 @@ async function buildBootstrapPayload(chatId) {
   try {
     // Кейсы нужны и до записи пользователя в БД (первый вход): каталог читается
     // один раз, а в приложение уходит без картинки-«простыни» (только imageUrl).
-    const caseCatalog = await getCaseCatalog(client)
+    const snapshot = await loadCaseCatalogSnapshot(client)
+    const caseCatalog = snapshot.cases
+    const caseCategories = snapshot.categories
     const caseStore = caseStorePayload(caseCatalog)
     const caseCards = caseCatalog.filter((item) => item.active !== false).map(toClientCase)
     // Каталог подарков юзербота: по нему экран кейса рисует подарки в слотах
@@ -1336,9 +1462,9 @@ async function buildBootstrapPayload(chatId) {
         // берутся из bootstrap, без отдельного запроса при открытии вкладки.
         vip: await getVipStatus(client, chatId),
         vipPlans,
-        // VIP за реальные деньги: цена приходит из кабинета Tribute, дни — из
-        // `vipPlans`. Пока Tribute не настроен, `enabled: false` и раздел
-        // оплаты картой в приложении не показывается.
+        // VIP за реальные деньги: цена и ссылка на оплату — у товара Tribute,
+        // срок — из названия товара или `TRIBUTE_VIP_PRODUCTS`. Пока ключ
+        // Tribute не задан, `enabled: false` и раздел оплаты картой не показывается.
         tributeVip: await tributeVipSnapshot(tributeConfig, vipPlans),
         marriage: null,
         activeItems: {},
@@ -1348,6 +1474,8 @@ async function buildBootstrapPayload(chatId) {
         cases: {},
         caseStore,
         caseCatalog: caseCards,
+
+        caseCategories,
         gifts: [],
         giftsCatalog,
         missionProgress: null,
@@ -1375,6 +1503,7 @@ async function buildBootstrapPayload(chatId) {
 
     return {
       user,
+      spaceStars: await spaceStars.snapshot(chatId).catch(() => ({ available: false, enabled: false, balance: null, packages: [] })),
       isOwner,
       vip: await getVipStatus(client, chatId),
       vipPlans,
@@ -1388,6 +1517,8 @@ async function buildBootstrapPayload(chatId) {
       cases,
       caseStore,
       caseCatalog: caseCards,
+
+      caseCategories,
       gifts,
       giftsCatalog,
       missionProgress,
@@ -1595,7 +1726,8 @@ function filterActiveClaims(claims, now) {
 async function getRecentCaseOpenings(client, chatId) {
   const result = await client.query(
     `
-    SELECT id, case_type, reward_type, reward_title, created_at
+    SELECT id, case_type, reward_type, reward_title, created_at,
+      reward_payload->>'deliveryStatus' AS delivery_status, reward_payload->>'deliveryId' AS delivery_id
     FROM case_openings
     WHERE chat_id = $1
     ORDER BY id DESC
@@ -2461,6 +2593,7 @@ async function getVipStatus(client, chatId) {
 }
 
 async function handlePaymentRelayUpdate(update) {
+  if (await spaceStars.handleUpdate(update)) return
   if (update.pre_checkout_query) {
     await handlePreCheckoutQuery(update.pre_checkout_query)
     return
@@ -2812,19 +2945,23 @@ async function userOwnsItem(client, chatId, itemId) {
 async function openCaseAndGrantReward(client, chatId, template, options = {}) {
   const caseType = template.id
 
-  await takeCaseFromBalance(client, chatId, caseType)
+  if (!options.skipTake) await takeCaseFromBalance(client, chatId, caseType)
 
-  const { reward, delivery } = await createCaseReward(client, chatId, template, options)
+  const { reward, delivery, queuedId } = await createCaseReward(client, chatId, template, options)
 
-  await client.query(
+  const history = await client.query(
     `
     INSERT INTO case_openings (chat_id, case_type, reward_type, reward_code, reward_title, reward_payload)
-    VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+    VALUES ($1, $2, $3, $4, $5, $6::jsonb) RETURNING id
     `,
     [chatId, caseType, reward.type, reward.code || null, reward.title, JSON.stringify(reward.payload || {})],
   )
 
-  return { reward, delivery }
+  if (queuedId) {
+    await client.query('UPDATE mini_app_case_deliveries SET opening_id=$2 WHERE id=$1',
+      [queuedId, history.rows[0].id])
+  }
+  return queuedId ? { reward, delivery, queuedId } : { reward, delivery }
 }
 
 /**
@@ -2834,14 +2971,14 @@ async function openCaseAndGrantReward(client, chatId, template, options = {}) {
  * `mini_app_case_balances`. Строка берётся `FOR UPDATE`, чтобы два открытия
  * подряд не ушли в минус.
  */
-async function takeCaseFromBalance(client, chatId, caseType) {
+async function takeCaseFromBalance(client, chatId, caseType, quantity = 1) {
   if (caseBalanceColumns.includes(caseType)) {
     const balanceResult = await client.query(
       `SELECT ${caseType} FROM case_balances WHERE chat_id = $1 FOR UPDATE`,
       [chatId],
     )
 
-    if (Number(balanceResult.rows[0]?.[caseType] || 0) <= 0) {
+    if (Number(balanceResult.rows[0]?.[caseType] || 0) < quantity) {
       throw new Error('Этот кейс закончился')
     }
 
@@ -2854,8 +2991,9 @@ async function takeCaseFromBalance(client, chatId, caseType) {
       [chatId],
     )
 
-    await client.query(`UPDATE case_balances SET ${caseType} = ${caseType} - 1, updated_at = now() WHERE chat_id = $1`, [
+    await client.query(`UPDATE case_balances SET ${caseType} = ${caseType} - $2, updated_at = now() WHERE chat_id = $1`, [
       chatId,
+      quantity,
     ])
 
     return
@@ -2871,18 +3009,18 @@ async function takeCaseFromBalance(client, chatId, caseType) {
     [chatId, caseType],
   )
 
-  if (Number(balanceResult.rows[0]?.amount || 0) <= 0) {
+  if (Number(balanceResult.rows[0]?.amount || 0) < quantity) {
     throw new Error('Этот кейс закончился')
   }
 
   await client.query(
     `
     UPDATE mini_app_case_balances
-    SET amount = amount - 1,
+    SET amount = amount - $3,
         updated_at = now()
     WHERE chat_id = $1 AND case_id = $2
     `,
-    [chatId, caseType],
+    [chatId, caseType, quantity],
   )
 }
 
@@ -2930,6 +3068,10 @@ async function createCaseReward(client, chatId, template, options = {}) {
   // Подарок Telegram: уникальный передаёт юзербот, обычный дарит бот — разбор
   // способа и откат при сбое внутри `deliverGift`. Отсюда `giftId` и `giftKind`
   // приходят в награду, чтобы приложение показало именно этот подарок.
+  if (options.batchRequestId && caseGiftDelivery.mode !== 'internal' && giftIdText(row.giftId)) {
+    return enqueueCaseGift(client, { chatId, requestId: options.batchRequestId,
+      index: options.batchIndex, row, template, langCode: options.langCode })
+  }
   return caseGiftDelivery.deliverGift({ client, chatId, row, template, ...options })
 }
 
@@ -3560,6 +3702,11 @@ async function isBotOwner(client, chatId) {
     console.warn('Проверка владельца бота недоступна:', error.message)
     return false
   }
+}
+
+// Local owner-only purchase trial. Do not broaden public sales via the global flag.
+async function canTestSpaceStarsPurchase(userId, productId) {
+  return Object.hasOwn(spaceStarProductUnits, String(productId)) && await isBotOwner(pool, userId)
 }
 
 /**

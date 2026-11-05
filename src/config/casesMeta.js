@@ -97,6 +97,13 @@ export const caseAccents = ['amber', 'cyan', 'violet', 'pink', 'green'];
 /** Стартовые шесть кейсов: их балансы лежат в колонках `case_balances`. */
 export const legacyCaseOrder = ['homeless', 'standard', 'unusual', 'premium', 'spring', 'march_8th'];
 
+/** Совместимость со старым bootstrap без caseCategories; новая витрина использует БД. */
+export const caseCategories = [
+  { id: 'standard', caseIds: ['homeless', 'standard', 'unusual', 'premium'] },
+  { id: 'thematic', caseIds: ['spring', 'march_8th'] },
+  { id: 'special', caseIds: [] },
+];
+
 /** Сколько строк наполнения можно повесить на один кейс (дубль сервера). */
 export const caseContentLimit = 24;
 

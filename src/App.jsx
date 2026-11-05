@@ -17,6 +17,7 @@ import MissionsScreen from './screens/MissionsScreen.jsx';
 import ProfileScreen from './screens/ProfileScreen.jsx';
 import ShopScreen from './screens/ShopScreen.jsx';
 import VipScreen from './screens/VipScreen.jsx';
+import TopUpScreen from './screens/TopUpScreen.jsx';
 import { LoadingScreen, MaintenanceScreen, MissingUserScreen, SetupScreen } from './screens/SetupScreens.jsx';
 import { readInitialDocsTopic, readInitialTab } from './utils/deepLink.js';
 
@@ -35,6 +36,7 @@ function App() {
   const [docsTopic, setDocsTopic] = useState(readInitialDocsTopic);
   /** Окно «?»: краткая справка по текущему разделу, без ухода со страницы. */
   const [helpOpen, setHelpOpen] = useState(false);
+  const [topUpOpen, setTopUpOpen] = useState(false);
 
   const openDocs = (topicId = '') => {
     setDocsTopic(topicId);
@@ -51,6 +53,7 @@ function App() {
   };
 
   const changeTab = tabId => {
+    setTopUpOpen(false);
     if (tabId === 'docs') {
       // Вкладка документации всегда открывает полный список, без фильтра раздела.
       setDocsTopic('');
@@ -208,11 +211,16 @@ function App() {
           onOpenHelp={activeTab === 'admin' ? null : openSectionHelp}
           telegramUser={telegram.user}
           user={data?.user}
+          spaceStars={data?.spaceStars}
+          onTopUp={() => setTopUpOpen(true)}
         />
       )}
 
 
-      <main className="app-main">
+      {topUpOpen && user && <div className="app-main"><TopUpScreen initData={telegram.initData}
+        onWallet={wallet => setData(previous => ({ ...previous, spaceStars: wallet }))}
+        onBack={() => setTopUpOpen(false)} /></div>}
+      <main className="app-main" hidden={topUpOpen}>
         {activeTab === 'admin' && <AdminScreen initData={telegram.initData} />}
         {activeTab !== 'admin' && loading && <LoadingScreen />}
         {activeTab !== 'admin' && !loading && error && <SetupScreen error={error} onRetry={loadData} />}
@@ -220,7 +228,7 @@ function App() {
         {activeTab !== 'admin' && !loading && !error && user && (
           <>
             {activeTab === 'cases' && (
-              <CasesScreen data={data} initData={telegram.initData} onData={updateData} onToast={setToast} />
+              <CasesScreen data={data} initData={telegram.initData} onData={updateData} onToast={setToast} onTopUp={() => setTopUpOpen(true)} />
             )}
             {activeTab === 'home' && <HomeScreen data={data} onOpenDocs={openDocs} onOpenShop={() => setActiveTab('shop')} />}
             {activeTab === 'shop' && (
@@ -230,6 +238,7 @@ function App() {
                 onEquip={equip}
                 onFavorite={toggleFavorite}
                 onPurchase={setPurchaseItem}
+                onToast={setToast}
               />
             )}
             {activeTab === 'inventory' && (
@@ -252,6 +261,7 @@ function App() {
             )}
             {activeTab === 'profile' && (
               <ProfileScreen
+                onTopUp={() => setTopUpOpen(true)}
                 data={data}
                 telegramUser={telegram.user}
                 onOpenAdmin={() => setActiveTab('admin')}
@@ -269,6 +279,7 @@ function App() {
                 onBack={() => setActiveTab('profile')}
                 onData={updateData}
                 onToast={setToast}
+            onTopUp={() => setTopUpOpen(true)}
               />
             )}
 

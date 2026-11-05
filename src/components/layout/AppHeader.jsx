@@ -22,7 +22,7 @@ function readScrollTop() {
  * Банан живёт только в профиле (WalletGrid), здесь его нет.
  * Панель прячется при скролле вниз и возвращается при скролле вверх.
  */
-function AppHeader({ user, telegramUser, onOpenHelp }) {
+function AppHeader({ user, telegramUser, onOpenHelp, spaceStars, onTopUp }) {
   const { t } = useTranslation();
   const [isHidden, setIsHidden] = useState(false);
   const avatarUrl = telegramUser?.photo_url || user?.photo_url || '';
@@ -108,6 +108,11 @@ function AppHeader({ user, telegramUser, onOpenHelp }) {
       </div>
 
       <div className="app-header__currencies">
+        <span className="app-header__currency app-header__currency--space-stars">
+          <span>⭐</span><span className="app-header__value">{spaceStars?.available ? spaceStars.balance : '—'}</span>
+          <small>Space Stars</small>
+          <button type="button" className="space-stars-plus" onClick={onTopUp} aria-label={t('topUp.title')}><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></svg></button>
+        </span>
         <span
           className="app-header__currency app-header__currency--coins"
           title={t('header.coins', { value: coins })}

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from '../../i18n/I18nContext.js';
+import { caseCategoryTitle } from '../../utils/caseCatalog.js';
 import { themeForAccent } from '../../utils/caseTheme.js';
 import CaseEditor from './CaseEditor.jsx';
 import CaseSpotlightAdmin from './CaseSpotlightAdmin.jsx';
@@ -21,6 +22,10 @@ function CasesAdminPanel({ adminRequest, onMessage }) {
   const { t, locale } = useTranslation();
   const [cases, setCases] = useState(null);
   const [catalog, setCatalog] = useState(null);
+  const [categories, setCategories] = useState([]);
+  const [categoryDraft, setCategoryDraft] = useState(null);
+  const [deletingCategory, setDeletingCategory] = useState('');
+  const [transferTarget, setTransferTarget] = useState('');
   const [caseId, setCaseId] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -29,6 +34,7 @@ function CasesAdminPanel({ adminRequest, onMessage }) {
     () => adminRequest('/api/admin/cases').then(payload => ({
       cases: payload.cases || [],
       catalog: payload.catalog || null,
+      categories: payload.categories || [],
     })),
     [adminRequest],
   );
@@ -41,6 +47,7 @@ function CasesAdminPanel({ adminRequest, onMessage }) {
         if (!cancelled) {
           setCases(payload.cases);
           setCatalog(payload.catalog);
+          setCategories(payload.categories);
         }
       })
       .catch(requestError => {
@@ -58,11 +65,15 @@ function CasesAdminPanel({ adminRequest, onMessage }) {
   const stored = caseId ? (cases || []).find(item => item.id === caseId) || null : null;
   // Кейса ещё нет в БД — редактор работает в режиме создания (`POST` вместо `PUT`).
   const isNew = Boolean(caseId) && !stored;
-  const caseItem = stored || (isNew ? blankCase(caseId) : null);
+  const caseItem = useMemo(
+    () => stored || (isNew ? blankCase(caseId, categories.find(item => item.id === 'standard')?.id || null) : null),
+    [stored, isNew, caseId, categories],
+  );
 
   /** Обновление состояния из ответа сервера: он всегда присылает весь список. */
   const applyPayload = payload => {
     setCases(payload.cases || []);
+    if (Array.isArray(payload.categories)) setCategories(payload.categories);
 
     if (payload.catalog) {
       setCatalog(payload.catalog);
@@ -167,6 +178,40 @@ function CasesAdminPanel({ adminRequest, onMessage }) {
     onMessage?.(t('admin.cases.giftRefreshed', { count: gifts.length, saved: savedGifts.length }));
   });
 
+
+  const saveCategory = () => run(async () => {
+    const id = categoryDraft.id;
+    const response = await adminRequest(id ? `/api/admin/case-categories/${id}` : '/api/admin/case-categories', {
+      method: id ? 'PUT' : 'POST',
+      body: JSON.stringify({ titles: categoryDraft.titles }),
+    });
+    applyPayload(response);
+    setCategoryDraft(null);
+  }, t('caseCategoryAdmin.saved'));
+
+  const moveCategory = (index, direction) => run(async () => {
+    const ids = categories.map(category => category.id);
+    const target = index + direction;
+    if (target < 0 || target >= ids.length) return;
+    [ids[index], ids[target]] = [ids[target], ids[index]];
+    applyPayload(await adminRequest('/api/admin/case-categories/reorder', {
+      method: 'POST', body: JSON.stringify({ ids }),
+    }));
+  });
+
+  const removeCategory = () => run(async () => {
+    applyPayload(await adminRequest(`/api/admin/case-categories/${deletingCategory}`, {
+      method: 'DELETE', body: JSON.stringify({ targetCategoryId: transferTarget || null }),
+    }));
+    setDeletingCategory('');
+  }, t('caseCategoryAdmin.deleted'));
+
+  const transferCase = (id, categoryId) => run(async () => {
+    applyPayload(await adminRequest(`/api/admin/cases/${id}/category`, {
+      method: 'PATCH', body: JSON.stringify({ categoryId: categoryId || null }),
+    }));
+  }, t('caseCategoryAdmin.moved'));
+
   return (
     <div className="docs-admin-panel">
       {error ? <div className="inline-alert">{error}</div> : null}
@@ -176,6 +221,7 @@ function CasesAdminPanel({ adminRequest, onMessage }) {
           busy={busy}
           catalog={catalog}
           caseItem={caseItem}
+          categories={categories}
           isNew={isNew}
           key={caseId}
           onBack={() => setCaseId('')}
@@ -193,6 +239,81 @@ function CasesAdminPanel({ adminRequest, onMessage }) {
             </div>
           ) : (
             <>
+              <section className="profile-panel cases-category-admin">
+                <div className="profile-panel__head">
+                  <h3>{t('caseCategoryAdmin.title')}</h3>
+                  <button className="btn btn-ghost btn-small" disabled={busy} type="button"
+                    onClick={() => run(async () => {
+                      applyPayload(await fetchList());
+                      setCategoryDraft(null);
+                      setDeletingCategory('');
+                    })}>
+                    {t('setup.refresh')}
+                  </button>
+                  <button className="btn btn-primary btn-small" disabled={busy} type="button"
+                    onClick={() => { setCategoryDraft({ id: '', titles: {} }); setDeletingCategory(''); }}>
+                    {t('caseCategoryAdmin.create')}
+                  </button>
+                </div>
+                <div className="profile-panel__body">
+                  <p className="admin-hint">{t('caseCategoryAdmin.hint')}</p>
+                  {categories.map((category, index) => (
+                    <div className="cases-category-admin__row" key={category.id}>
+                      <strong>{caseCategoryTitle(category, locale, t)}</strong>
+                      <span>{t('caseCategoryAdmin.count', { count: (cases || []).filter(item => item.categoryId === category.id).length })}</span>
+                      <div className="cases-category-admin__tools">
+                        <button className="btn btn-ghost btn-small" disabled={busy || index === 0} type="button"
+                          aria-label={t('caseCategoryAdmin.up')} onClick={() => moveCategory(index, -1)}>↑</button>
+                        <button className="btn btn-ghost btn-small" disabled={busy || index === categories.length - 1} type="button"
+                          aria-label={t('caseCategoryAdmin.down')} onClick={() => moveCategory(index, 1)}>↓</button>
+                        <button className="btn btn-ghost btn-small" disabled={busy} type="button"
+                          onClick={() => { setCategoryDraft({ id: category.id, titles: { ...category.titles } }); setDeletingCategory(''); }}>
+                          {t('caseCategoryAdmin.edit')}
+                        </button>
+                        <button className="btn btn-ghost btn-small" disabled={busy} type="button"
+                          onClick={() => { setDeletingCategory(category.id); setTransferTarget(''); setCategoryDraft(null); }}>
+                          {t('caseCategoryAdmin.delete')}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {categoryDraft ? (
+                    <form className="missions-form" onSubmit={event => { event.preventDefault(); if (!busy) saveCategory(); }}>
+                      {(catalog?.locales || ['ru', 'en', 'uk']).map(code => (
+                        <label className="missions-field" key={code}>
+                          <span>{t('caseCategoryAdmin.name')} ({code.toUpperCase()})</span>
+                          <input className="docs-input" maxLength={60} disabled={busy}
+                            value={categoryDraft.titles[code] || ''}
+                            onChange={event => setCategoryDraft(current => ({ ...current, titles: { ...current.titles, [code]: event.target.value } }))} />
+                        </label>
+                      ))}
+                      <div className="cases-category-admin__tools">
+                        <button className="btn btn-primary btn-small" disabled={busy || !Object.values(categoryDraft.titles).some(value => value.trim())} type="submit">{t('admin.cases.save')}</button>
+                        <button className="btn btn-ghost btn-small" disabled={busy} type="button" onClick={() => setCategoryDraft(null)}>{t('admin.cases.cancel')}</button>
+                      </div>
+                    </form>
+                  ) : null}
+                  {deletingCategory ? (
+                    <div className="docs-confirm cases-category-admin__confirm">
+                      <p>{t('caseCategoryAdmin.deleteConfirm')}</p>
+                      <label className="missions-field">
+                        <span>{t('caseCategoryAdmin.transferTo')}</span>
+                        <select className="docs-input" disabled={busy} value={transferTarget} onChange={event => setTransferTarget(event.target.value)}>
+                          <option value="">{t('cases.categories.unassigned')}</option>
+                          {categories.filter(category => category.id !== deletingCategory).map(category => (
+                            <option key={category.id} value={category.id}>{caseCategoryTitle(category, locale, t)}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="cases-category-admin__tools">
+                        <button className="btn btn-small docs-danger" disabled={busy} type="button" onClick={removeCategory}>{t('caseCategoryAdmin.delete')}</button>
+                        <button className="btn btn-ghost btn-small" disabled={busy} type="button" onClick={() => setDeletingCategory('')}>{t('admin.cases.cancel')}</button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </section>
+
               <CaseSpotlightAdmin
                 busy={busy}
                 cases={cases || []}
@@ -205,6 +326,8 @@ function CasesAdminPanel({ adminRequest, onMessage }) {
                 cases={cases || []}
                 catalog={catalog}
                 language={locale}
+                categories={categories}
+                onTransfer={transferCase}
                 onCreate={setCaseId}
                 onOpen={setCaseId}
                 onToggle={toggleCase}
@@ -242,9 +365,10 @@ function caseBody(item) {
  * состав из четырёх призов повторяет первый кейс из `caseDefaults`, поэтому новый
  * кейс сразу можно сохранить и открыть, а дальше владелец правит его под себя.
  */
-function blankCase(id) {
+function blankCase(id, categoryId) {
   return {
     id,
+    categoryId,
     titles: {},
     texts: {},
     accent: 'cyan',

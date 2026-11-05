@@ -109,7 +109,7 @@ export function createCaseGiftDelivery({ botToken = '', mode = caseGiftDeliveryM
    */
   async function sendCatalogGift({ giftId, userId, text }) {
     if (!botToken) {
-      throw new Error('BOT_TOKEN не настроен на сервере — подарок отправить нечем')
+      throw Object.assign(new Error('BOT_TOKEN не настроен на сервере — подарок отправить нечем'), { deliveryOutcome: 'not_sent' })
     }
 
     const timeoutMs = caseGiftSendTimeoutMs()
@@ -139,11 +139,14 @@ export function createCaseGiftDelivery({ botToken = '', mode = caseGiftDeliveryM
         payload = { description: raw.slice(0, 200) }
       }
 
-      if (!response.ok || !payload?.ok) {
+      if (!response.ok || payload?.ok !== true || payload.result !== true) {
         const description = String(payload?.description || '').trim()
         const code = Number(payload?.error_code) || response.status
 
-        throw new Error(`${description || 'Bot API отклонил отправку подарка'} (код ${code})`)
+        throw Object.assign(new Error(`${description || 'Bot API отклонил отправку подарка'} (код ${code})`), {
+          deliveryOutcome: payload.ok === false && response.status >= 400 && response.status < 500 && code >= 400 && code < 500 ? 'not_sent' : 'unknown',
+          retryAfter: payload.ok === false && response.status === 429 && code === 429 ? Math.max(5, Number(payload.parameters?.retry_after) || 60) : 0,
+        })
       }
 
       return { sent: true, text: caption }
@@ -248,7 +251,7 @@ export function createCaseGiftDelivery({ botToken = '', mode = caseGiftDeliveryM
       const address = await resolveUniqueAddress(base)
 
       if (!address.msgId && !address.slug) {
-        fail('userbot-transfer', 'у уникального подарка нет адреса на аккаунте (ни msg_id, ни slug)', { address })
+        fail('userbot-transfer', 'у уникального подарка нет адреса на аккаунте (ни msg_id, ни slug)', { address, outcome: 'not_sent' })
       }
 
       let result = null
@@ -287,7 +290,7 @@ export function createCaseGiftDelivery({ botToken = '', mode = caseGiftDeliveryM
     try {
       sent = await sendCatalogGift({ giftId, userId: targetUserId, text: giftCaption(langCode, base.caseTitle) })
     } catch (error) {
-      fail('bot-sendgift', String(error?.message || error))
+      fail('bot-sendgift', String(error?.message || error), { outcome: error.deliveryOutcome || 'unknown', retryAfter: error.retryAfter || 0 })
     }
 
     return {

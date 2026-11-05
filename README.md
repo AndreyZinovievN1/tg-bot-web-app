@@ -27,7 +27,7 @@ The interface is built from screens with a shared bottom navigation, the theme a
 | 🛍️ Shop | skins and items, purchases for coins and Telegram Stars, favourites, equipping |
 | 🎒 Inventory | bought and won items, Telegram gifts, a shortcut to equipping |
 | 🎯 Missions | daily and weekly tasks, XP, milestone track with reward cases, progress polled every 5 seconds |
-| 💎 VIP | subscription for Telegram Stars for 30, 180 and 365 days, Tribute checkout |
+| 💎 VIP | VIP for 30, 180 and 365 days: Telegram Stars or card/SBP via Tribute digital products |
 | 📚 Docs | built-in articles with search and deep links from the bot |
 | 🛠️ Admin panel | cases, missions, articles, users, maintenance mode, sign-in by pattern or code |
 | 🌍 Languages | English, Russian, Ukrainian, auto-detected from Telegram |
@@ -85,7 +85,7 @@ Every value is documented in `.env.example`. The main ones:
 | `TELEGRAM_AUTH_MAX_AGE_SECONDS` | `initData` lifetime, `0` disables the age check |
 | `GIFTS_API_URL` | gift catalogue and Lottie animations provided by the userbot |
 | `CASE_GIFT_DELIVERY` | case reward delivery mode: `telegram` or `internal` |
-| `TRIBUTE_API_KEY`, `TRIBUTE_VIP_LINK` | VIP payments through Tribute |
+| `TRIBUTE_API_KEY`, `TRIBUTE_VIP_PRODUCTS` | VIP payments through Tribute (digital products) |
 | `VITE_SUPPORT_URL` | support link inside the help block |
 
 Secrets never reach the repository: `.env` and `.env.local` are listed in `.gitignore`.

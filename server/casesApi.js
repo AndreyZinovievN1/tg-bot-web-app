@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
 import { giftIdText } from './giftsApi.js'
 
@@ -221,6 +222,39 @@ const caseThemeMigrations = [
 
 // ── Схема хранения ─────────────────────────────────────────────────────────
 
+export const caseCategorySchemaSql = `
+-- CASE CATEGORIES MIGRATION: seed only when category_id is first introduced.
+DO $case_categories$
+BEGIN
+  PERFORM pg_advisory_xact_lock(723410, 1);
+  CREATE TABLE IF NOT EXISTS mini_app_case_categories (
+    id text PRIMARY KEY,
+    titles jsonb NOT NULL DEFAULT '{}'::jsonb,
+    sort_order integer NOT NULL DEFAULT 100,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+  );
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = 'mini_app_cases'::regclass
+      AND attname = 'category_id' AND NOT attisdropped
+  ) THEN
+    ALTER TABLE mini_app_cases ADD COLUMN category_id text
+      REFERENCES mini_app_case_categories(id) ON DELETE SET NULL;
+    INSERT INTO mini_app_case_categories (id, titles, sort_order) VALUES
+      ('standard', '{"ru":"Стандартные кейсы","en":"Standard cases","uk":"Стандартні кейси"}', 10),
+      ('thematic', '{"ru":"Тематические кейсы","en":"Themed cases","uk":"Тематичні кейси"}', 20),
+      ('special', '{"ru":"Особые кейсы","en":"Special cases","uk":"Особливі кейси"}', 30)
+    ON CONFLICT (id) DO NOTHING;
+    UPDATE mini_app_cases SET category_id = CASE
+      WHEN id IN ('spring', 'march_8th') THEN 'thematic' ELSE 'standard' END;
+  END IF;
+  CREATE INDEX IF NOT EXISTS idx_mini_app_cases_category ON mini_app_cases(category_id);
+END;
+$case_categories$;
+-- END CASE CATEGORIES MIGRATION
+`
+
 export const caseSchemaSql = `
 CREATE TABLE IF NOT EXISTS mini_app_cases (
   id text PRIMARY KEY,
@@ -273,6 +307,7 @@ export async function ensureCasesSchema(pool) {
 
   try {
     await client.query(caseSchemaSql)
+    await client.query(caseCategorySchemaSql)
     const existing = await client.query('SELECT id FROM mini_app_cases')
     const present = new Set(existing.rows.map((row) => row.id))
     let added = 0
@@ -282,7 +317,7 @@ export async function ensureCasesSchema(pool) {
         continue
       }
 
-      await client.query(caseInsertSql, caseInsertValues(item))
+      await client.query(caseInsertSql, caseInsertValues({ ...item, categoryId: ['spring', 'march_8th'].includes(item.id) ? 'thematic' : 'standard' }))
       added += 1
     }
 
@@ -304,14 +339,15 @@ export async function ensureCasesSchema(pool) {
 
 const caseSelectSql = `
 SELECT id, titles, texts, accent, stars, image, contents, active, sort_order,
-       theme, featured, created_at, updated_at
+       theme, featured, category_id, created_at, updated_at
 FROM mini_app_cases
 `
 
 const caseInsertSql = `
 INSERT INTO mini_app_cases
-  (id, titles, texts, accent, stars, image, contents, active, sort_order, theme, featured)
-VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, $6, $7::jsonb, $8, $9, $10::jsonb, $11)
+  (id, titles, texts, accent, stars, image, contents, active, sort_order, theme, featured, category_id)
+VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, $6, $7::jsonb, $8, $9, $10::jsonb, $11,
+  (SELECT id FROM mini_app_case_categories WHERE id = $12))
 RETURNING *
 `
 
@@ -326,6 +362,7 @@ SET titles = $2::jsonb,
     active = $8,
     sort_order = $9,
     theme = $10::jsonb,
+    category_id = CASE WHEN $12::boolean THEN $11::text ELSE category_id END,
     updated_at = now()
 WHERE id = $1
 RETURNING *
@@ -345,6 +382,7 @@ function caseInsertValues(item) {
     Number(item.sortOrder ?? 100),
     JSON.stringify(normalizeCaseTheme(item.theme, item.accent)),
     item.featured === true,
+    item.categoryId === undefined ? 'standard' : item.categoryId,
   ]
 }
 
@@ -358,6 +396,7 @@ export function buildCaseTemplate(row) {
 
   return {
     id: String(row?.id || ''),
+    categoryId: row?.category_id ?? row?.categoryId ?? null,
     titles: caseLocaleMap(row?.titles, caseTitleMax),
     texts: caseLocaleMap(row?.texts, caseTextMax),
     accent,
@@ -376,14 +415,8 @@ export function buildCaseTemplate(row) {
 
 /** Актуальный список кейсов из БД (пустая таблица — пустой список). */
 export async function loadCaseTemplates(client) {
-  try {
-    const result = await client.query(`${caseSelectSql} ORDER BY sort_order, id`)
-
-    return result.rows.map(buildCaseTemplate)
-  } catch (error) {
-    console.warn('Таблица кейсов недоступна, используется стартовый набор:', error.message)
-    return []
-  }
+  const result = await client.query(`${caseSelectSql} ORDER BY sort_order, id`)
+  return result.rows.map(buildCaseTemplate)
 }
 
 /** Стартовый набор кейсов, если в БД ещё ничего не сохранено. */
@@ -445,6 +478,7 @@ export function caseImageUrl(template) {
 export function toClientCase(template) {
   return {
     id: template.id,
+    categoryId: template.categoryId,
     titles: template.titles,
     texts: template.texts,
     accent: template.accent,
@@ -526,9 +560,46 @@ function caseUpdateValues(item, image) {
     item.active !== false,
     Number(item.sortOrder ?? 100),
     JSON.stringify(normalizeCaseTheme(item.theme, item.accent)),
+    item.categoryId ?? null,
+    item.categoryId !== undefined,
   ]
 }
 
+
+
+/** Undefined preserves the assignment in old PUT requests; null unassigns it. */
+export function normalizeCategoryId(value) {
+  if (value === undefined || value === null) return value
+  if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(value)) {
+    throw new Error('Некорректная категория кейса')
+  }
+  return value
+}
+
+export function normalizeCategoryTitles(value) {
+  const titles = caseLocaleMap(value, caseTitleMax)
+  if (!Object.keys(titles).length) throw new Error('Укажите название категории')
+  return titles
+}
+
+export function buildCaseCategory(row) {
+  return { id: row.id, titles: row.titles, sortOrder: Number(row.sort_order) }
+}
+
+/** One SQL snapshot, no process-local cache: every bootstrap sees committed edits. */
+export async function loadCaseCatalogSnapshot(client) {
+  const result = await client.query(`
+    SELECT
+      COALESCE((SELECT jsonb_agg(to_jsonb(c) ORDER BY c.sort_order, c.id)
+        FROM mini_app_cases c), '[]'::jsonb) AS cases,
+      COALESCE((SELECT jsonb_agg(to_jsonb(g) ORDER BY g.sort_order, g.id)
+        FROM mini_app_case_categories g), '[]'::jsonb) AS categories
+  `)
+  return {
+    cases: result.rows[0].cases.map(buildCaseTemplate),
+    categories: result.rows[0].categories.map(buildCaseCategory),
+  }
+}
 
 // ── Проверка и нормализация ────────────────────────────────────────────────
 
@@ -693,6 +764,7 @@ export function normalizeCasePayload(raw, { id = '' } = {}) {
 
   return {
     id,
+    categoryId: normalizeCategoryId(source.categoryId),
     titles: caseLocaleMap(source.titles, caseTitleMax),
     texts: caseLocaleMap(source.texts, caseTextMax),
     accent: normalizedAccent,
@@ -932,7 +1004,7 @@ export function createCasesApi({
   }
 
   async function respondWithCases(client, res, { refreshGifts = false } = {}) {
-    const result = await client.query(`${caseSelectSql} ORDER BY sort_order, id`)
+    const snapshot = await loadCaseCatalogSnapshot(client)
     // Каталог подарков юзербота: редактор наполнения выбирает конкретный
     // подарок для строки типа `gift`. Если юзербот недоступен — пустой массив,
     // форма всё равно откроется.
@@ -941,9 +1013,10 @@ export function createCasesApi({
     // («есть на аккаунте»), чтобы владелец выбирал из того, что есть на руках.
     const savedGifts = await loadedSavedGifts({ force: refreshGifts })
 
-    res.json({
+    return {
       ok: true,
-      cases: result.rows.map(buildCaseTemplate),
+      cases: snapshot.cases,
+      categories: snapshot.categories,
       catalog: {
         locales: caseLocales,
         accents: caseAccents,
@@ -956,19 +1029,39 @@ export function createCasesApi({
         savedGifts,
         savedStatus: savedGiftsState(savedGifts.length),
       },
-    })
+    }
   }
 
   async function withClient(res, next, handler) {
     const client = await pool.connect()
-
     try {
-      await handler(client)
+      const payload = await handler(client)
+      if (!res.headersSent && payload) res.json(payload)
     } catch (error) {
       next(error)
     } finally {
       client.release()
     }
+  }
+
+  async function withMutation(res, next, handler) {
+    await withClient(res, next, async client => {
+      let changed
+      try {
+        await client.query('BEGIN')
+        await client.query('SELECT pg_advisory_xact_lock(723410, 2)')
+        changed = await handler(client)
+        await client.query('COMMIT')
+      } catch (error) {
+        await client.query('ROLLBACK')
+        throw error
+      }
+      if (changed === true) {
+        onChange?.()
+        // Release write locks before reading gift catalogs or sending the response.
+        return respondWithCases(client, res)
+      }
+    })
   }
 
   /** Проверка тела кейса: ошибки возвращаем как 400 с текстом для владельца. */
@@ -980,6 +1073,99 @@ export function createCasesApi({
       return null
     }
   }
+
+
+  async function assertCategory(client, id) {
+    if (id == null) return
+    const result = await client.query('SELECT 1 FROM mini_app_case_categories WHERE id = $1', [id])
+    if (!result.rowCount) throw new Error('Категория не найдена')
+  }
+
+  function categoryPayload(req, res) {
+    try {
+      return normalizeCategoryTitles(req.body?.titles)
+    } catch (error) {
+      res.status(400).json({ error: error.message })
+      return null
+    }
+  }
+
+  router.post('/api/admin/case-categories', ...guards, async (req, res, next) => {
+    const titles = categoryPayload(req, res)
+    if (!titles) return
+    await withMutation(res, next, async client => {
+      await client.query(`INSERT INTO mini_app_case_categories (id, titles, sort_order)
+        SELECT $1, $2::jsonb, COALESCE(MAX(sort_order), 0) + 10 FROM mini_app_case_categories`,
+      [randomUUID(), JSON.stringify(titles)])
+      return true
+    })
+  })
+
+  router.put('/api/admin/case-categories/:id', ...guards, async (req, res, next) => {
+    const titles = categoryPayload(req, res)
+    if (!titles) return
+    await withMutation(res, next, async client => {
+      const result = await client.query(`UPDATE mini_app_case_categories
+        SET titles = $2::jsonb, updated_at = now() WHERE id = $1`,
+      [req.params.id, JSON.stringify(titles)])
+      if (!result.rowCount) return res.status(404).json({ error: 'Категория не найдена' })
+      return true
+    })
+  })
+
+  router.post('/api/admin/case-categories/reorder', ...guards, async (req, res, next) => {
+    await withMutation(res, next, async client => {
+      const ids = req.body?.ids
+      const result = await client.query('SELECT id FROM mini_app_case_categories')
+      const current = new Set(result.rows.map(row => row.id))
+      if (!Array.isArray(ids) || ids.length !== current.size || new Set(ids).size !== ids.length
+        || ids.some(id => !current.has(id))) {
+        return res.status(409).json({ error: 'Список категорий изменился. Обновите данные' })
+      }
+      await client.query(`UPDATE mini_app_case_categories AS c
+        SET sort_order = ordered.position::integer * 10, updated_at = now()
+        FROM unnest($1::text[]) WITH ORDINALITY AS ordered(id, position)
+        WHERE c.id = ordered.id`, [ids])
+      return true
+    })
+  })
+
+  router.delete('/api/admin/case-categories/:id', ...guards, async (req, res, next) => {
+    let target
+    try {
+      target = normalizeCategoryId(req.body?.targetCategoryId)
+      if (target === undefined || target === req.params.id) throw new Error('Выберите категорию для переноса')
+    } catch (error) {
+      return res.status(400).json({ error: error.message })
+    }
+    await withMutation(res, next, async client => {
+      try { await assertCategory(client, target) } catch (error) {
+        return res.status(400).json({ error: error.message })
+      }
+      await client.query('UPDATE mini_app_cases SET category_id = $2 WHERE category_id = $1', [req.params.id, target])
+      const result = await client.query('DELETE FROM mini_app_case_categories WHERE id = $1', [req.params.id])
+      if (!result.rowCount) return res.status(404).json({ error: 'Категория не найдена' })
+      return true
+    })
+  })
+
+  router.patch('/api/admin/cases/:id/category', ...guards, async (req, res, next) => {
+    let categoryId
+    try {
+      categoryId = normalizeCategoryId(req.body?.categoryId)
+      if (categoryId === undefined) throw new Error('Выберите категорию для переноса')
+    } catch (error) {
+      return res.status(400).json({ error: error.message })
+    }
+    await withMutation(res, next, async client => {
+      try { await assertCategory(client, categoryId) } catch (error) {
+        return res.status(400).json({ error: error.message })
+      }
+      const result = await client.query('UPDATE mini_app_cases SET category_id = $2 WHERE id = $1', [req.params.id, categoryId])
+      if (!result.rowCount) return res.status(404).json({ error: 'Кейс не найден' })
+      return true
+    })
+  })
 
   router.get('/api/admin/cases', ...guards, async (req, res, next) => {
     // `?refresh=1` — кнопка «обновить» в пикере подарков: каталог тянется из юзербота
@@ -1007,7 +1193,7 @@ export function createCasesApi({
       }
     }
 
-    await withClient(res, next, async (client) => {
+    await withMutation(res, next, async (client) => {
       if (caseId) {
         const exists = await client.query('SELECT 1 FROM mini_app_cases WHERE id = $1', [caseId])
 
@@ -1019,8 +1205,7 @@ export function createCasesApi({
 
       // Флаг только один: сервер сам снимает его с остальных кейсов.
       await client.query('UPDATE mini_app_cases SET featured = (id = $1)', [caseId])
-      onChange?.()
-      await respondWithCases(client, res)
+      return true
     })
   })
 
@@ -1040,8 +1225,9 @@ export function createCasesApi({
       return
     }
 
-    await withClient(res, next, async (client) => {
+    await withMutation(res, next, async (client) => {
       try {
+        await assertCategory(client, payload.categoryId)
         await assertContentsGallery(client, payload.contents)
         assertContentsGifts(await loadedGifts(), payload.contents, await loadedSavedGifts())
       } catch (error) {
@@ -1057,8 +1243,7 @@ export function createCasesApi({
       }
 
       await client.query(caseInsertSql, caseInsertValues({ ...payload, image: payload.image || null }))
-      onChange?.()
-      await respondWithCases(client, res)
+      return true
     })
   })
 
@@ -1078,8 +1263,9 @@ export function createCasesApi({
       return
     }
 
-    await withClient(res, next, async (client) => {
+    await withMutation(res, next, async (client) => {
       try {
+        await assertCategory(client, payload.categoryId)
         await assertContentsGallery(client, payload.contents)
         assertContentsGifts(await loadedGifts(), payload.contents, await loadedSavedGifts())
       } catch (error) {
@@ -1098,15 +1284,14 @@ export function createCasesApi({
       const image = payload.image === undefined ? (current.rows[0].image || null) : payload.image
 
       await client.query(caseUpdateSql, caseUpdateValues(payload, image))
-      onChange?.()
-      await respondWithCases(client, res)
+      return true
     })
   })
 
   router.delete('/api/admin/cases/:id', ...guards, async (req, res, next) => {
     const id = String(req.params.id || '')
 
-    await withClient(res, next, async (client) => {
+    await withMutation(res, next, async (client) => {
       const result = await client.query('DELETE FROM mini_app_cases WHERE id = $1', [id])
 
       if (result.rowCount === 0) {
@@ -1116,8 +1301,7 @@ export function createCasesApi({
 
       // Остатки кейсов у игроков не трогаем: удаление (и повторное создание)
       // кейса не должно выдавать или сжигать их балансы.
-      onChange?.()
-      await respondWithCases(client, res)
+      return true
     })
   })
 
@@ -1149,3 +1333,58 @@ export function createCasesApi({
 }
 
 export default createCasesApi
+/** Public reward projection: never expose owners or raw delivery payloads. Read only. */
+export async function loadCaseDrops(client, caseType) {
+  if (typeof caseType !== 'string' || !caseType.trim() || caseType.length > 128) return []
+  const result = await client.query(`
+    SELECT id, case_type, reward_type, reward_title, created_at,
+      reward_payload->>'giftId' AS gift_id,
+      CASE WHEN reward_code = 'tg-unique' THEN 'unique' ELSE '' END AS gift_kind,
+      reward_payload->>'amount' AS amount,
+      reward_payload->>'days' AS days
+    FROM case_openings
+    WHERE case_type = $1
+      AND COALESCE(reward_payload->>'demo', 'false') <> 'true'
+      AND COALESCE(reward_payload->>'deliveryStatus', 'sent') = 'sent'
+    ORDER BY id DESC
+    LIMIT 100
+  `, [caseType.trim()])
+  return result.rows.map(row => ({
+    id: String(row.id), caseType: row.case_type, type: row.reward_type,
+    createdAt: row.created_at, giftId: String(row.gift_id || ''),
+    giftKind: row.gift_kind === 'unique' ? 'unique' : '',
+    amount: Number(row.amount) || 0, days: Number(row.days) || 0,
+    title: /^(?:gift\s+\d+|(?:предмет|скин)\s*#\d+)$/i.test(String(row.reward_title || '').trim()) ? '' : String(row.reward_title || ''),
+  }))
+}
+
+
+
+// Caller owns BEGIN/COMMIT: the request, stock debit, all rewards and history
+// become visible together. The unique key serializes concurrent retries.
+export async function openCaseBatch(client, { chatId, requestId, quantity, template, take, grant }) {
+  const fail = (message, status = 409) => { throw Object.assign(new Error(message), { status }) }
+  if (!Number.isInteger(quantity) || quantity < 2 || quantity > 5 ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId || '')) {
+    fail('Invalid batch request', 400)
+  }
+  const step = async (stage, action) => {
+    try { return await action() } catch (error) { error.batchStage = stage; throw error }
+  }
+  await step('record-request', () => client.query(
+    'INSERT INTO mini_app_case_batches (chat_id, request_id, case_type, quantity) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING',
+    [chatId, requestId, template.id, quantity]))
+  const saved = await step('read-request', () => client.query(
+    'SELECT case_type, quantity, results FROM mini_app_case_batches WHERE chat_id=$1 AND request_id=$2 FOR UPDATE',
+    [chatId, requestId]))
+  const operation = saved.rows[0]
+  if (operation.case_type !== template.id || operation.quantity !== quantity) fail('Batch request conflict')
+  if (operation.results) return { results: operation.results, replay: true }
+  if (template.active === false) fail('Этот кейс недоступен')
+  await step('debit-stock', () => take(client, chatId, template.id, quantity))
+  const results = []
+  for (let i = 0; i < quantity; i += 1) results.push(await step('grant-and-history', () => grant(client, chatId, template, { skipTake: true, batchRequestId: requestId, batchIndex: i })))
+  await step('save-results', () => client.query('UPDATE mini_app_case_batches SET results=$3::jsonb WHERE chat_id=$1 AND request_id=$2',
+    [chatId, requestId, JSON.stringify(results)]))
+  return { results, replay: false }
+}

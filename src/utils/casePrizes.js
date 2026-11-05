@@ -32,6 +32,44 @@ export function prizeVisual(type) {
   return rewardVisuals[prizeType(type)] || rewardVisuals.coins;
 }
 
+/** Do not compare different currencies. Equal tiers are grouped by reward type. */
+export function orderCaseDrops(drops, best, gifts = []) {
+  const ranks = ['common', 'uncommon', 'rare', 'epic', 'legendary'];
+  const rows = (Array.isArray(drops) ? drops : []).filter(row => row && !row.demo)
+    .map(row => ({ ...row, type: prizeType(row.type) }));
+  if (!best) return rows;
+  const value = row => row.type === 'gift'
+    ? Number(findGift(gifts, row.giftId)?.stars || 0)
+    : Number(row.amount || row.days || 0);
+  return rows.sort((a, b) =>
+    ranks.indexOf(rewardVisuals[b.type]?.tier) - ranks.indexOf(rewardVisuals[a.type]?.tier)
+    || a.type.localeCompare(b.type)
+    || value(b) - value(a));
+}
+
+/** Local simulation only: same thousandth weights as the server, no economy calls. */
+export function sampleDemoReward(meta, random = Math.random) {
+  const pool = (Array.isArray(meta?.contents) ? meta.contents : []).map(row => ({
+    row, weight: Math.max(0, Math.round(Number(row.weight || 0) * 1000)),
+  })).filter(item => Number.isFinite(item.weight) && item.weight > 0);
+  const total = pool.reduce((sum, item) => sum + item.weight, 0);
+  if (!total) return null;
+  let roll = Math.floor(random() * total);
+  const row = pool.find(item => { roll -= item.weight; return roll < 0; })?.row;
+  if (!row) return null;
+  const defaults = { coins: [100, 500], starcoins: [5, 25], vip: [1, 3] };
+  const range = defaults[row.type];
+  const payload = {};
+  if (range) {
+    const min = Math.max(0, Math.round(Number(row.min ?? range[0])));
+    const max = Math.max(min, Math.round(Number(row.max ?? range[1])));
+    const amount = min + Math.floor(random() * (max - min + 1));
+    payload[row.type === 'vip' ? 'days' : 'amount'] = row.type === 'vip' ? Math.max(1, amount) : amount;
+  }
+  return { type: row.type, giftId: row.giftId, giftKind: row.giftKind,
+    giftNum: row.giftNum, payload, demo: true };
+}
+
 /** Целое количество приза (0 — у типа нет числа: предмет, скин, подарок). */
 function prizeAmount(value) {
   const number = Number(value);

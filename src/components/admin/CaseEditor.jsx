@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { caseCategoryTitle } from '../../utils/caseCatalog.js';
 import { FaStar } from 'react-icons/fa';
 import {
   FiArrowLeft,
@@ -45,6 +46,7 @@ import CaseThemePicker from './CaseThemePicker.jsx';
 function CaseEditor({
   busy,
   catalog,
+  categories = [],
   caseItem,
   isNew = false,
   onBack,
@@ -139,6 +141,7 @@ function CaseEditor({
 
     onSave({
       id: draft.id,
+      ...(isNew || draft.categoryId !== caseItem.categoryId ? { categoryId: draft.categoryId ?? null } : {}),
       titles: draft.titles || {},
       texts: draft.texts || {},
       accent: draft.accent,
@@ -250,6 +253,17 @@ function CaseEditor({
               </>
             ) : null}
           </section>
+
+          <label className="missions-field">
+            <span>{t('caseCategoryAdmin.category')}</span>
+            <select className="docs-input" disabled={busy} value={draft.categoryId || ''}
+              onChange={event => update('categoryId', event.target.value || null)}>
+              <option value="">{t('cases.categories.unassigned')}</option>
+              {categories.map(category => (
+                <option key={category.id} value={category.id}>{caseCategoryTitle(category, locale, t)}</option>
+              ))}
+            </select>
+          </label>
 
           {/* 1. Основное: виден ли кейс, цвет капсулы и цена в Stars. */}
           <Group hint={t('admin.cases.mainHint')} label={t('admin.cases.groupMain')}>

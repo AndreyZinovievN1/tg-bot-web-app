@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { FiArrowLeft, FiCreditCard, FiStar, FiZap } from 'react-icons/fi';
+import { useRef, useState } from 'react';
+import { FiArrowLeft } from 'react-icons/fi';
 import { ImCoinDollar } from 'react-icons/im';
 import { IoPlanet, IoStar } from 'react-icons/io5';
 import {
@@ -11,7 +11,7 @@ import {
 } from 'react-icons/tb';
 import { apiRequest } from '../api/client.js';
 import { useTranslation } from '../i18n/I18nContext.js';
-import { formatDateOnly, formatMoney, formatNumber } from '../utils/formatters.js';
+import { formatDateOnly, formatNumber } from '../utils/formatters.js';
 
 /**
  * Преимущества подписки — те же пункты, что и в документации бота.
@@ -26,202 +26,41 @@ const vipBenefits = [
   { key: 'divorce', Icon: TbHeartHandshake },
 ];
 
-/**
- * Раздел «VIP-подписка»: текущий статус, тарифы и оплата.
- *
- * Оплата звёздами идёт тем же путём, что и кейсы (см. `CasesScreen`): сервер
- * создаёт заказ и `createInvoiceLink`, приложение открывает счёт через
- * `WebApp.openInvoice`, а после закрытия счёта досчитывает заказ
- * `/api/payments/sync`.
- *
- * Оплата реальными деньгами (карта, СБП) идёт через Tribute: у подписок
- * Tribute нет ручки «создать счёт», поэтому приложение открывает ссылку
- * подписки из кабинета автора, а VIP включает вебхук Tribute (см.
- * `server/tributeApi.js`). Кнопка «Проверить оплату» сверяется с Tribute на
- * случай задержки вебхука.
- *
- * Срок хранится в базе бота (`vip_users`), поэтому новая покупка продлевает
- * подписку, а не сбрасывает её. Статус, срок и тарифы приходят в bootstrap
- * (`data.vip`, `data.vipPlans`, `data.tributeVip`): цены живут на сервере,
- * подделать их из приложения нельзя.
- */
-function VipScreen({ data, initData, onBack, onData, onToast }) {
+function VipScreen({ data, initData, onBack, onData, onToast, onTopUp }) {
   const { t, tp } = useTranslation();
   const [buyingPlanId, setBuyingPlanId] = useState('');
-  const [payMethod, setPayMethod] = useState('stars');
-  const [tributeAwaiting, setTributeAwaiting] = useState(false);
-  const [checkingPayment, setCheckingPayment] = useState(false);
+  const lock = useRef(false);
+  const requestKey = `space-vip-purchase:${data.user?.chat_id}`;
+  const [pending, setPending] = useState(() => {
+    try { return JSON.parse(sessionStorage.getItem(requestKey)); } catch { return null; }
+  });
   const vip = data?.vip || { active: false, until: null, daysLeft: 0 };
   const plans = Array.isArray(data?.vipPlans) ? data.vipPlans : [];
-  const tribute = data?.tributeVip || null;
-  const cardPlans = tribute?.enabled && Array.isArray(tribute.plans) ? tribute.plans : [];
-  // Оплата картой выключена или тарифов нет — звёзды остаются единственным способом.
-  const activeMethod = payMethod === 'card' && cardPlans.length > 0 ? 'card' : 'stars';
   const user = data?.user || {};
   const coins = user.coins ?? 0;
   const holder = cardHolder(user) || t('vip.cardHolderFallback');
 
   const buyPlan = async plan => {
-    if (buyingPlanId) {
-      return;
-    }
-
-    setBuyingPlanId(plan.id);
-    triggerHaptic('impactOccurred', 'light');
-
+    if (data.spaceStars?.balance != null && BigInt(data.spaceStars.balance) < BigInt(plan.stars)) { return; }
+    if (lock.current || !data.spaceStars?.vipPurchasesEnabled) return;
+    if (pending && pending.planId !== plan.id) { onToast(t('vip.spaceRetryFirst')); return; }
+    lock.current = true; setBuyingPlanId(plan.id);
+    let purchased = false;
     try {
-      const payload = await apiRequest('/api/vip/purchase-link', {
-        method: 'POST',
-        body: JSON.stringify({
-          planId: plan.id,
-        }),
-      }, initData);
-
-      const webApp = window.Telegram?.WebApp;
-
-      if (webApp?.openInvoice) {
-        webApp.openInvoice(payload.invoiceLink, async status => {
-          try {
-            if (status === 'paid') {
-              const synced = await syncOrder(payload.orderId, initData);
-
-              if (synced?.order?.status === 'fulfilled') {
-                onData(synced.data);
-                triggerHaptic('notificationOccurred', 'success');
-                onToast(tp('vip.granted', plan.days, { days: plan.days }));
-              } else {
-                onToast(t('vip.paymentSyncing'));
-              }
-            } else if (status === 'cancelled') {
-              onToast(t('vip.paymentCancelled'));
-            } else if (status === 'failed') {
-              onToast(t('vip.paymentFailed'));
-            }
-          } catch (error) {
-            onToast(error.message);
-          } finally {
-            setBuyingPlanId('');
-          }
-        });
-        return;
-      }
-
-      window.open(payload.invoiceLink, '_blank', 'noopener,noreferrer');
-      onToast(t('vip.invoiceOpened'));
+      const request = pending || { planId:plan.id, requestId:crypto.randomUUID() };
+      sessionStorage.setItem(requestKey, JSON.stringify(request)); setPending(request);
+      await apiRequest('/api/space-stars/vip/purchase', { method:'POST', body:JSON.stringify(request) }, initData);
+      purchased = true;
+      const refreshed = await apiRequest('/api/bootstrap', {}, initData);
+      onData(refreshed);
+      sessionStorage.removeItem(requestKey); setPending(null);
+      triggerHaptic('notificationOccurred', 'success');
+      onToast(tp('vip.granted', plan.days, { days:plan.days }));
     } catch (error) {
-      onToast(error.message);
-    } finally {
-      if (!window.Telegram?.WebApp?.openInvoice) {
-        setBuyingPlanId('');
-      }
-    }
+      if (!purchased && (error.status === 400 || error.status === 409)) { sessionStorage.removeItem(requestKey); setPending(null); }
+      onToast(t(error.payload?.error === 'SPACE_STARS_INSUFFICIENT_BALANCE' ? 'cases.spaceInsufficient' : 'cases.spacePurchaseError'));
+    } finally { lock.current = false; setBuyingPlanId(''); }
   };
-
-  /**
-   * Оплата картой: открываем ссылку подписки Tribute (внутри Telegram — через
-   * `openLink`, иначе — новое окно). Дальше ждём вебхук и подсказываем
-   * «Проверить оплату»: мини-апп при возврате из Tribute не перезагружается.
-   */
-  const openTributePlan = () => {
-    if (!tribute?.link) {
-      onToast(t('vip.cardUnavailable'));
-      return;
-    }
-
-    triggerHaptic('impactOccurred', 'light');
-
-    const webApp = window.Telegram?.WebApp;
-
-    if (webApp?.openLink) {
-      webApp.openLink(tribute.link);
-    } else {
-      window.open(tribute.link, '_blank', 'noopener,noreferrer');
-    }
-
-    setTributeAwaiting(true);
-    onToast(t('vip.cardOpened'));
-  };
-
-  /**
-   * «Проверить оплату»: сервер сверяется с Tribute и отдаёт свежий bootstrap.
-   * Обычно вебхук приходит раньше, поэтому VIP уже включён — остаётся обновить экран.
-   */
-  const checkTributePayment = useCallback(async () => {
-    if (checkingPayment) {
-      return;
-    }
-
-    setCheckingPayment(true);
-
-    try {
-      const payload = await apiRequest('/api/vip/tribute/sync', { method: 'POST' }, initData);
-
-      if (payload?.data) {
-        onData(payload.data);
-      }
-
-      if (payload?.vip?.active) {
-        triggerHaptic('notificationOccurred', 'success');
-        onToast(t('vip.checkPaid', { date: formatDateOnly(payload.vip.until) }));
-        setTributeAwaiting(false);
-      } else {
-        onToast(t('vip.checkNotFound'));
-      }
-    } catch (error) {
-      onToast(error.message);
-    } finally {
-      setCheckingPayment(false);
-    }
-  }, [checkingPayment, initData, onData, onToast, t]);
-
-  // Возврат из Tribute: экран не перезагружается, поэтому проверяем оплату,
-  // когда мини-апп снова становится видимым (и по событию `activated`).
-  useEffect(() => {
-    if (!tributeAwaiting) {
-      return undefined;
-    }
-
-    const webApp = window.Telegram?.WebApp;
-    const handleVisible = () => {
-      if (document.visibilityState === 'visible') {
-        void checkTributePayment();
-      }
-    };
-
-    document.addEventListener('visibilitychange', handleVisible);
-    webApp?.onEvent?.('activated', checkTributePayment);
-
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisible);
-      webApp?.offEvent?.('activated', checkTributePayment);
-    };
-  }, [checkTributePayment, tributeAwaiting]);
-
-  // Первый bootstrap может прийти без цен Tribute (каталог ещё не загрузился):
-  // один раз перезапрашиваем данные, чтобы под тарифами появились суммы.
-  const pricesRetryRef = useRef(false);
-  useEffect(() => {
-    if (!tribute?.enabled || tribute.pricesReady || pricesRetryRef.current) {
-      return undefined;
-    }
-
-    pricesRetryRef.current = true;
-
-    const timer = window.setTimeout(async () => {
-      try {
-        const payload = await apiRequest('/api/bootstrap', {}, initData);
-
-        // В режиме тех. работ bootstrap отдаёт заглушку — её не применяем.
-        if (payload?.user || payload?.vip) {
-          onData(payload);
-        }
-      } catch {
-        // Цены необязательны: тарифы работают и без них.
-      }
-    }, 1500);
-
-    return () => window.clearTimeout(timer);
-  }, [tribute?.enabled, tribute?.pricesReady, initData, onData]);
 
   return (
     <section className="screen vip-screen">
@@ -315,78 +154,10 @@ function VipScreen({ data, initData, onBack, onData, onToast }) {
       <section className="vip-plans">
         <header className="vip-plans__head">
           <h2>{t('vip.plansLabel')}</h2>
-          <span>{activeMethod === 'card' ? t('vip.cardHint') : t('vip.plansHint')}</span>
+          <span>{t('vip.plansHint')}</span>
         </header>
 
-        {/* Способ оплаты показываем только когда Tribute настроен на сервере
-            (`data.tributeVip.enabled`), иначе остаются звёзды. */}
-        {cardPlans.length > 0 ? (
-          <div aria-label={t('vip.payMethodLabel')} className="vip-pay" role="group">
-            <button
-              aria-pressed={activeMethod === 'stars'}
-              className={`vip-pay__tab ${activeMethod === 'stars' ? 'is-active' : ''}`}
-              type="button"
-              onClick={() => setPayMethod('stars')}
-            >
-              <FiStar aria-hidden="true" />
-              {t('vip.payMethodStars')}
-            </button>
-            <button
-              aria-pressed={activeMethod === 'card'}
-              className={`vip-pay__tab ${activeMethod === 'card' ? 'is-active' : ''}`}
-              type="button"
-              onClick={() => setPayMethod('card')}
-            >
-              <FiCreditCard aria-hidden="true" />
-              {t('vip.payMethodCard')}
-            </button>
-          </div>
-        ) : null}
-
-        {activeMethod === 'card' ? (
-          <>
-            {cardPlans.map(plan => (
-              <article className={`vip-plan ${plan.popular ? 'is-popular' : ''}`} key={`card-${plan.id}`}>
-                {plan.popular ? <span className="vip-plan__badge">{t('vip.popular')}</span> : null}
-
-                <span className="vip-plan__info">
-                  <strong>{tp('vip.planDays', plan.days, { days: plan.days })}</strong>
-                  <small>
-                    {plan.price === null || plan.price === undefined
-                      ? t('vip.cardRowHint')
-                      : t('vip.perDayMoney', { price: formatMoney(perDayMoney(plan), tribute?.currency) })}
-                  </small>
-                </span>
-
-                <button
-                  className="vip-plan__buy vip-plan__buy--card"
-                  type="button"
-                  onClick={openTributePlan}
-                >
-                  <FiCreditCard aria-hidden="true" />
-                  <span>
-                    {plan.price === null || plan.price === undefined
-                      ? t('vip.payByCard')
-                      : formatMoney(plan.price, tribute?.currency)}
-                  </span>
-                </button>
-              </article>
-            ))}
-
-            <p className="vip-pay__hint">{t('vip.cardPayHint')}</p>
-
-            {/* После открытия Tribute подсказываем проверку: вебхук может
-                прийти с задержкой, а экран не перезагружается. */}
-            {tributeAwaiting ? (
-              <div className="vip-awaiting">
-                <span>{t('vip.cardOpened')}</span>
-                <button disabled={checkingPayment} type="button" onClick={checkTributePayment}>
-                  {checkingPayment ? t('vip.checkingPayment') : t('vip.checkPayment')}
-                </button>
-              </div>
-            ) : null}
-          </>
-        ) : plans.length === 0 ? (
+        {plans.length === 0 ? (
           <p className="vip-plans__empty">{t('vip.plansEmpty')}</p>
         ) : (
           plans.map(plan => (
@@ -400,23 +171,20 @@ function VipScreen({ data, initData, onBack, onData, onToast }) {
 
               <button
                 className="vip-plan__buy"
-                disabled={Boolean(buyingPlanId)}
+                disabled={Boolean(buyingPlanId) || !data.spaceStars?.vipPurchasesEnabled || (data.spaceStars?.balance != null && BigInt(data.spaceStars.balance) < BigInt(plan.stars))}
                 type="button"
                 onClick={() => buyPlan(plan)}
               >
-                {buyingPlanId === plan.id ? (
-                  t('vip.buying')
-                ) : (
-                  <>
-                    <FiZap aria-hidden="true" />
-                    <span>{formatNumber(plan.stars)}</span>
-                    <FiStar aria-hidden="true" />
-                  </>
-                )}
+                {t('cases.spaceBuy', { count: formatNumber(plan.stars) })}
               </button>
+              {data.spaceStars?.balance != null && BigInt(data.spaceStars.balance) < BigInt(plan.stars) && <div className="vip-plan__shortfall">
+                <p role="status">{t('vip.spaceMissing', { count: formatNumber(Number(BigInt(plan.stars) - BigInt(data.spaceStars.balance))) })}</p>
+                <button type="button" className="vip-plan__buy" onClick={onTopUp}>{t('topUp.methodsTitle')}</button>
+              </div>}
             </article>
           ))
         )}
+        {!data.spaceStars?.vipPurchasesEnabled && <p>{t('vip.spaceDisabled')}</p>}
       </section>
 
       {/* ===== примечание: срок действия и правила продления ===== */}
@@ -445,37 +213,6 @@ function perDayStars(plan) {
   const stars = Number(plan?.stars) || 0;
 
   return days > 0 && stars > 0 ? Math.max(1, Math.round(stars / days)) : 0;
-}
-
-/** Цена дня в валюте тарифа — подпись под сроком у тарифов за карту. */
-function perDayMoney(plan) {
-  const days = Number(plan?.days) || 0;
-  const price = Number(plan?.price) || 0;
-
-  return days > 0 && price > 0 ? price / days : 0;
-}
-
-async function syncOrder(orderId, initData) {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const payload = await apiRequest('/api/payments/sync', {
-      method: 'POST',
-      body: JSON.stringify({ orderId }),
-    }, initData);
-
-    if (payload.order?.status === 'fulfilled') {
-      return payload;
-    }
-
-    await wait(1400);
-  }
-
-  return null;
-}
-
-function wait(ms) {
-  return new Promise(resolve => {
-    window.setTimeout(resolve, ms);
-  });
 }
 
 function triggerHaptic(method, type) {

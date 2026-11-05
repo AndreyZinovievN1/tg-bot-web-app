@@ -1,4 +1,4 @@
-import { caseTypes as legacyCaseTypes, legacyCaseOrder } from '../config/casesMeta.js';
+import { caseTypes as legacyCaseTypes, legacyCaseOrder, caseCategories } from '../config/casesMeta.js';
 import { themeForAccent } from './caseTheme.js';
 
 /**
@@ -15,6 +15,7 @@ import { themeForAccent } from './caseTheme.js';
  * встроенные PNG.
  */
 export function buildCaseTypes(catalog, base = legacyCaseTypes) {
+  // Legacy metadata also labels historical openings; visibility is controlled by caseOrderFrom.
   const types = { ...base };
 
   for (const item of Array.isArray(catalog) ? catalog : []) {
@@ -54,7 +55,7 @@ export function buildCaseTypes(catalog, base = legacyCaseTypes) {
 export function caseOrderFrom(catalog, fallback = legacyCaseOrder) {
   const items = (Array.isArray(catalog) ? catalog : []).filter(item => item?.id);
 
-  if (items.length === 0) {
+  if (!Array.isArray(catalog)) {
     return [...fallback];
   }
 
@@ -64,4 +65,29 @@ export function caseOrderFrom(catalog, fallback = legacyCaseOrder) {
       || String(left.id).localeCompare(String(right.id))
     ))
     .map(item => item.id);
+}
+
+/** Stable category IDs preserve independent collapse state across title/order edits. */
+export function groupCaseCatalog(order, types, categories) {
+  const serverCategories = Array.isArray(categories);
+  const groups = (serverCategories ? categories : caseCategories)
+    .filter(item => item?.id)
+    .map(item => ({ ...item, cases: [] }))
+    .sort((a, b) => Number(a.sortOrder ?? 100) - Number(b.sortOrder ?? 100)
+      || (serverCategories ? String(a.id).localeCompare(String(b.id)) : 0));
+  const byId = new Map(groups.map(group => [group.id, group]));
+  const unassigned = { id: '__uncategorized', cases: [] };
+  for (const id of new Set(order)) {
+    const categoryId = serverCategories ? types[id]?.categoryId
+      : caseCategories.find(category => category.caseIds.includes(id))?.id || 'standard';
+    (byId.get(categoryId) || unassigned).cases.push(id);
+  }
+  return [...groups, unassigned].filter(group => group.cases.length > 0);
+}
+
+export function caseCategoryTitle(category, locale, t) {
+  if (!category || category.id === '__uncategorized') return t('cases.categories.unassigned');
+  const titles = category.titles || {};
+  return titles[locale] || titles.ru || Object.values(titles).find(Boolean)
+    || (category.caseIds ? t(`cases.categories.${category.id}`) : category.id);
 }

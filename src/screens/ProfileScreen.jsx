@@ -32,7 +32,7 @@ function riseStyle(index) {
   return { animationDelay: `${Math.min(index, 8) * riseStep}ms` };
 }
 
-function ProfileScreen({ data, telegramUser, onOpenAdmin, onOpenDocs, onOpenHelp, onOpenInventory, onOpenVip }) {
+function ProfileScreen({ data, telegramUser, onOpenAdmin, onOpenDocs, onOpenHelp, onOpenInventory, onOpenVip, onTopUp }) {
   const { t, tp } = useTranslation();
   const { user, marriage, activeItems, inventory, cases, isOwner, vip } = data;
   const groupsActivity = safeObject(user.groups_activity);
@@ -104,6 +104,9 @@ function ProfileScreen({ data, telegramUser, onOpenAdmin, onOpenDocs, onOpenHelp
           {memberSince ? (
             <span className="profile-identity__since">{t('profile.memberSince', { date: memberSince })}</span>
           ) : null}
+        </div>
+        <div className="profile-space-stars">⭐ {data.spaceStars?.available ? data.spaceStars.balance : '—'} <small>Space Stars</small>
+          <button className="space-stars-plus" type="button" onClick={onTopUp} aria-label={t('topUp.title')}>+</button>
         </div>
       </header>
 
@@ -194,6 +197,7 @@ function ProfileScreen({ data, telegramUser, onOpenAdmin, onOpenDocs, onOpenHelp
       >
         <LanguageSwitcher />
       </ProfilePanel>
+
 
       {/* Склад убран из нижнего меню и живёт заметным блоком внизу профиля. */}
       {profileSections.storeEntry && onOpenInventory && (

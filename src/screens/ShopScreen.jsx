@@ -6,6 +6,7 @@ import { useTranslation } from '../i18n/I18nContext.js';
 import { themeColor } from '../theme/colors.js';
 import { categoryIcon, categoryLabel, compareCategories, itemName, isEquippable, categoryText, getChartSkinUrl, previewText } from '../utils/shop.js';
 import { formatNumber } from '../utils/formatters.js';
+import DonatePanels from '../components/shop/DonatePanels.jsx';
 
 /* ---------- иконки категорий ---------- */
 const iconMap = {
@@ -148,14 +149,21 @@ const SORT_OPTIONS = [
  * и кейсов (`ops-hero` со счётчиком баланса, `ops-panel` с угловыми скобками),
  * но в ледяной гамме витрины — моно-подписи, плиты товаров со сканирующей
  * линией и цена в звёздах. Логика покупки, избранного и экипировки прежняя.
+ *
+ * Сверху — витрина покупок (`DonatePanels`): VIP, астроны и монеты с общим
+ * переключателем «Звёзды | Картой». Пока это визуальный слой: кнопки покупки
+ * валюты и тарифов показывают подсказку через `onToast`, платежи не создаются.
+ * Каталог скинов идёт следом, якорь — `#shop-skins`.
  */
-function ShopScreen({ busyItemId, data, onEquip, onFavorite, onPurchase }) {
+function ShopScreen({ busyItemId, data, onEquip, onFavorite, onPurchase, onToast }) {
   const { t } = useTranslation();
   const [category, setCategory] = useState('all');
   const [query, setQuery] = useState('');
   const [sortBy, setSortBy] = useState('default');
   const [sortOpen, setSortOpen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(48);
+  // Способ оплаты общий для всей витрины: звёзды Telegram или карта/СБП.
+  const [payMethod, setPayMethod] = useState('stars');
 
   const categories = useMemo(() => [...data.categories].sort(compareCategories), [data.categories]);
 
@@ -216,8 +224,16 @@ function ShopScreen({ busyItemId, data, onEquip, onFavorite, onPurchase }) {
         </div>
       </header>
 
+      {/* ===== витрина покупок: VIP, астроны и монеты ===== */}
+      <DonatePanels
+        data={data}
+        method={payMethod}
+        onDemo={message => onToast?.(message)}
+        onMethod={setPayMethod}
+      />
+
       {/* ===== поиск, сортировка и категории ===== */}
-      <section className="ops-panel market-panel">
+      <section className="ops-panel market-panel" id="shop-skins">
         <div className="ops-panel__head">
           <span className="ops-panel__label">{t('shop.filterLabel')}</span>
           <span className="ops-panel__count market-panel__note">
