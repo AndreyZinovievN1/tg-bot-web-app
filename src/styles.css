@@ -16469,3 +16469,41 @@ h4 {
 .app-header__currency.app-header__currency--space-stars > button.space-stars-plus::before, .profile-space-stars > button.space-stars-plus { box-shadow: 0 0 5px 1px rgba(145,82,255,.65), 0 0 12px 2px rgba(110,70,255,.32); transition: box-shadow 180ms ease; }
 @media (hover: hover) { .app-header__currency.app-header__currency--space-stars > button.space-stars-plus:hover::before, .profile-space-stars > button.space-stars-plus:hover { box-shadow: 0 0 6px 1px rgba(145,82,255,.75), 0 0 14px 2px rgba(110,70,255,.4); } }
 @media (prefers-reduced-motion: reduce) { .app-header__currency.app-header__currency--space-stars > button.space-stars-plus::before, .profile-space-stars > button.space-stars-plus { transition: none; } }
+
+/* --- премиум-эмодзи Telegram (`PremiumEmoji`, /api/emoji) ---
+   Узел тянется на всю плиту родителя (превью маркета, шторка покупки, слот
+   склада — все они grid с place-items: center), а медиа внутри — contain,
+   чтобы Lottie/WebP/WebM не обрезались и не растягивались. */
+.premium-emoji {
+  display: inline-grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+}
+
+.premium-emoji__media {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+}
+
+.premium-emoji__lottie,
+.premium-emoji__lottie > svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.premium-emoji__fallback {
+  color: var(--accent);
+  font-size: 0.85em;
+}
+
+/* Чип активного оформления в профиле: родитель строчный, поэтому размер
+   задаём явно — как у обычного символа эмодзи (26px у .style-row__emoji). */
+.premium-emoji--chip {
+  width: 26px;
+  height: 26px;
+}

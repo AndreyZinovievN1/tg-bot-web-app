@@ -25,6 +25,7 @@ import {
   openCaseBatch,
   toClientCase,
 } from './casesApi.js'
+import { createEmojisApi } from './emojisApi.js'
 import {
   createGiftsApi,
   giftCatalogSnapshot,
@@ -1213,6 +1214,11 @@ app.use(casesRouter)
 // ссылкам `/api/gifts/sticker/{id}.json` — их читает плеер в мини-аппе.
 const giftsRouter = createGiftsApi({ requireTelegramUser })
 app.use(giftsRouter)
+
+// Премиум-эмодзи Telegram: Bot API `getCustomEmojiStickers` + кэш файлов в
+// `public/emojis`. Открытые ручки `/api/emoji/{id}` и `/api/emoji/{id}.{ext}` —
+// их читает плеер в мини-аппе, initData передать он не может.
+app.use(createEmojisApi({ botToken, cacheDir: path.join(rootDir, 'public', 'emojis') }))
 
 // VIP за реальные деньги (Tribute): вебхук об оплате и «Проверить оплату» из
 // приложения. Вебхук без Telegram-авторизации — вместо неё проверяется подпись

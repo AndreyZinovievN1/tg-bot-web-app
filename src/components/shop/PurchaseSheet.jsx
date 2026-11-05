@@ -7,7 +7,8 @@ import { IoPlanet } from 'react-icons/io5';
 import { useTranslation } from '../../i18n/I18nContext.js';
 import { themeColor } from '../../theme/colors.js';
 import { formatNumber } from '../../utils/formatters.js';
-import { categoryIcon, categoryLabel, categoryText, getChartSkinUrl, itemName, previewText } from '../../utils/shop.js';
+import { categoryIcon, categoryLabel, categoryText, getChartSkinUrl, itemName, previewText, premiumEmojiId } from '../../utils/shop.js';
+import PremiumEmoji from '../common/PremiumEmoji.jsx';
 
 /* ---------- иконки категорий (как в маркете и инвентаре) ---------- */
 const iconMap = {
@@ -52,7 +53,9 @@ function ItemHero({ item }) {
         >
           START
         </span>
-      ) : item.category === 'emojis' || item.category === 'premium_emojis' ? (
+      ) : item.category === 'premium_emojis' ? (
+        <PremiumEmoji emojiId={premiumEmojiId(item)} />
+      ) : item.category === 'emojis' ? (
         <span className="purchase-hero__emoji">{text}</span>
       ) : (
         <span className="purchase-hero__letter">{text}</span>

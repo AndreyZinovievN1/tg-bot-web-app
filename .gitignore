@@ -22,6 +22,10 @@ dist-ssr
 # флаг один и у каждого окружения свой.
 server/maintenance.json
 
+# Кэш премиум-эмодзи (/api/emoji → server/emojisApi.js и «+стикер» бота):
+# файлы иммутабельны по custom_emoji_id и докачиваются из Telegram сами.
+public/emojis/
+
 
 # Editor directories and files
 .vscode/*

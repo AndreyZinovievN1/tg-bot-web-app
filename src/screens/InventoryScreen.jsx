@@ -33,8 +33,10 @@ import {
   getChartSkinUrl,
   isEquippable,
   itemName,
+  premiumEmojiId,
   previewText,
 } from '../utils/shop.js';
+import PremiumEmoji from '../components/common/PremiumEmoji.jsx';
 
 /**
  * СКЛАД — игровой инвентарь.
@@ -100,15 +102,23 @@ function ItemArt({ item }) {
     );
   }
 
+  // Premium-эмодзи — это custom_emoji_id в text_m: вместо буквы «P» показываем
+  // саму анимацию из Telegram (Lottie/WebP/WebM через /api/emoji).
+  const premiumId = premiumEmojiId(item);
+
+  if (premiumId) {
+    return <PremiumEmoji emojiId={premiumId} lazy />;
+  }
+
   const name = itemName(item).trim();
-  const isEmoji = item.category === 'emojis' || item.category === 'premium_emojis';
+  const isEmoji = item.category === 'emojis';
 
   // Обычные эмодзи подписаны самим символом — показываем его крупно.
   if (isEmoji && [...name].length <= 4) {
     return <span className="inv-art__emoji">{name}</span>;
   }
 
-  // Premium-эмодзи подписаны telegram-id, поэтому вместо буквы — акцентная иконка.
+  // Эмодзи с длинной подписью — акцентная иконка.
   if (isEmoji) {
     return (
       <span className="inv-art__stack">

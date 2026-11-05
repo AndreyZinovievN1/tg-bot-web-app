@@ -4,9 +4,10 @@ import { ImCoinDollar } from 'react-icons/im';
 import { IoPlanet } from 'react-icons/io5';
 import { useTranslation } from '../i18n/I18nContext.js';
 import { themeColor } from '../theme/colors.js';
-import { categoryIcon, categoryLabel, compareCategories, itemName, isEquippable, categoryText, getChartSkinUrl, previewText } from '../utils/shop.js';
+import { categoryIcon, categoryLabel, compareCategories, itemName, isEquippable, categoryText, getChartSkinUrl, previewText, premiumEmojiId } from '../utils/shop.js';
 import { formatNumber } from '../utils/formatters.js';
 import DonatePanels from '../components/shop/DonatePanels.jsx';
+import PremiumEmoji from '../components/common/PremiumEmoji.jsx';
 
 /* ---------- иконки категорий ---------- */
 const iconMap = {
@@ -52,7 +53,9 @@ function ItemPreview({ item }) {
         >
           START
         </span>
-      ) : item.category === 'emojis' || item.category === 'premium_emojis' ? (
+      ) : item.category === 'premium_emojis' ? (
+        <PremiumEmoji emojiId={premiumEmojiId(item)} lazy />
+      ) : item.category === 'emojis' ? (
         <span className="market-card__preview-emoji">{text}</span>
       ) : (
         <span className="market-card__preview-letter">{text}</span>

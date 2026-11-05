@@ -10,7 +10,8 @@ import {
 import { activeLabelKeys } from '../../config/shop.js';
 import { useTranslation } from '../../i18n/I18nContext.js';
 import { themeRgb } from '../../theme/colors.js';
-import { getChartSkinUrl, itemName } from '../../utils/shop.js';
+import { getChartSkinUrl, itemName, premiumEmojiId } from '../../utils/shop.js';
+import PremiumEmoji from '../common/PremiumEmoji.jsx';
 
 const chipIcons = {
   title: <FiAward />,
@@ -113,6 +114,16 @@ function renderValue(chip) {
   }
 
   if (chip.key === 'emoji') {
+    const premiumId = premiumEmojiId(chip.item);
+
+    if (premiumId) {
+      return (
+        <span className="style-row__emoji">
+          <PremiumEmoji className="premium-emoji--chip" emojiId={premiumId} />
+        </span>
+      );
+    }
+
     return <span className="style-row__emoji">{chip.value}</span>;
   }
 

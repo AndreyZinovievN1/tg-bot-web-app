@@ -11,12 +11,35 @@ export function getAvatarText(user, activeItems) {
   return (user?.name || 'S').trim().slice(0, 1).toUpperCase();
 }
 
+/**
+ * `custom_emoji_id` премиум-эмодзи Telegram лежит в `text_m` товара
+ * (бот подставляет его же в `<tg-emoji emoji-id>`, см. `inventory.py`).
+ * Обычные `emojis` хранят в `text_m` сам символ — их сюда не передаём.
+ */
+export function premiumEmojiId(item) {
+  if (item?.category !== 'premium_emojis') {
+    return '';
+  }
+
+  const id = String(item.text_m || item.text_f || '').trim();
+
+  return /^\d{4,}$/.test(id) ? id : '';
+}
+
 export function itemName(item) {
   if (!item) {
     return t('shopItems.itemFallback');
   }
 
   if (item.category === 'premium_emojis') {
+    // Если в `text_f` лежит короткая подпись (символ-заменитель или имя набора),
+    // показываем её вместо технического номера товара.
+    const label = String(item.text_f || '').trim();
+
+    if (label && !/^\d+$/.test(label) && [...label].length <= 8) {
+      return label;
+    }
+
     return t('shopItems.premiumEmojiNumber', { id: item.id });
   }
 
